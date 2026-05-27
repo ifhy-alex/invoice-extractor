@@ -1,8 +1,15 @@
 __pycache__/
 *.pyc
 *.pyo
+*.log
+.env
+
+# Generated output
+output/
+invoices/
+
+# Generated files (if placed outside output/)
 *.db
 *.csv
 *.html
-*.log
-.env
+invoices.json

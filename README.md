@@ -39,12 +39,21 @@ Python 3.8+ required.
 ## Project Structure
 
 ```
-config.py              → Shared paths, fields, constants
-extract_invoices.py    → PDF → text → regex → CSV + SQLite
-audit_invoices.py      → Verifies extracted data against source PDFs
-dashboard.py           → Generates interactive HTML dashboard
-validate_invoices.py   → Logical/contextual data validation
-json_to_db.py          → Alternative JSON-to-SQLite importer (optional)
+pdf-project/
+├── invoices/              ← your PDF files go here (not tracked by git)
+├── output/                ← all generated files (not tracked by git)
+│   ├── invoices.csv
+│   ├── invoices_charges.csv
+│   ├── invoices.json
+│   ├── invoices.db
+│   ├── dashboard.html
+│   └── audit_report.html
+├── config.py              → Paths (auto-configured, override via env vars)
+├── extract_invoices.py    → PDF → text → regex → CSV + JSON + SQLite
+├── audit_invoices.py      → Verifies extracted data against source PDFs
+├── dashboard.py           → Generates interactive HTML dashboard
+├── validate_invoices.py   → Logical/contextual data validation
+└── json_to_db.py          → Alternative JSON-to-SQLite importer (optional)
 ```
 
 ---
@@ -57,16 +66,29 @@ json_to_db.py          → Alternative JSON-to-SQLite importer (optional)
 pip install pymupdf tqdm
 ```
 
-### Step 2: Configure paths
+### Step 2: Set up your PDF folder
 
-Edit `config.py` with your paths:
+Place your invoice PDFs in a folder called `invoices/` next to the project:
 
-```python
-PDF_DIR        = r"C:\path\to\your\invoice\pdfs"
-CSV_OUT        = r"C:\path\output\invoices.csv"
-DB_OUT         = r"C:\path\output\invoices.db"
-HTML_DASHBOARD = r"C:\path\output\dashboard.html"
-HTML_AUDIT     = r"C:\path\output\audit_report.html"
+```
+pdf-project/
+├── invoices/          ← put your PDFs here
+├── output/            ← generated automatically
+├── extract_invoices.py
+├── config.py
+└── ...
+```
+
+Or set custom paths via environment variables:
+
+```cmd
+:: Windows
+set INVOICE_PDF_DIR=C:\path\to\your\pdfs
+set INVOICE_OUTPUT_DIR=C:\path\to\output
+
+:: Linux/Mac
+export INVOICE_PDF_DIR=/path/to/your/pdfs
+export INVOICE_OUTPUT_DIR=/path/to/output
 ```
 
 ### Step 3: Run extraction

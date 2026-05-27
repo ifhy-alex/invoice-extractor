@@ -1,16 +1,31 @@
 """
 config.py
 Shared configuration between extract_invoices.py, audit_invoices.py and dashboard.py.
+
+Paths can be overridden via environment variables:
+    INVOICE_PDF_DIR=C:/path/to/pdfs
+    INVOICE_OUTPUT_DIR=C:/path/to/output
 """
 
+import os
+from pathlib import Path
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
-PDF_DIR        = r"C:\Users\alexf\OneDrive\Escritorio\invoices"
-CSV_OUT        = r"C:\Users\alexf\OneDrive\Escritorio\invoices.csv"
-CSV_CHARGES    = r"C:\Users\alexf\OneDrive\Escritorio\invoices_charges.csv"
-JSON_OUT       = r"C:\Users\alexf\OneDrive\Escritorio\invoices.json"
-DB_OUT         = r"C:\Users\alexf\OneDrive\Escritorio\invoices.db"
-HTML_DASHBOARD = r"C:\Users\alexf\OneDrive\Escritorio\dashboard.html"
-HTML_AUDIT     = r"C:\Users\alexf\OneDrive\Escritorio\audit_report.html"
+# Default: 'invoices/' folder next to the project, output in 'output/' folder
+_PROJECT_DIR = Path(__file__).parent
+_PDF_DIR     = os.environ.get("INVOICE_PDF_DIR", str(_PROJECT_DIR / "invoices"))
+_OUTPUT_DIR  = os.environ.get("INVOICE_OUTPUT_DIR", str(_PROJECT_DIR / "output"))
+
+# Create output dir if it doesn't exist
+Path(_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+
+PDF_DIR        = _PDF_DIR
+CSV_OUT        = str(Path(_OUTPUT_DIR) / "invoices.csv")
+CSV_CHARGES    = str(Path(_OUTPUT_DIR) / "invoices_charges.csv")
+JSON_OUT       = str(Path(_OUTPUT_DIR) / "invoices.json")
+DB_OUT         = str(Path(_OUTPUT_DIR) / "invoices.db")
+HTML_DASHBOARD = str(Path(_OUTPUT_DIR) / "dashboard.html")
+HTML_AUDIT     = str(Path(_OUTPUT_DIR) / "audit_report.html")
 
 # ── Fields ─────────────────────────────────────────────────────────────────────
 ALL_FIELDS = [
