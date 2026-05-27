@@ -253,6 +253,16 @@ def main():
   <div class="card"><h3>Amount by Date</h3><canvas id="cTimeline"></canvas></div>
   <div class="card"><h3>Fuel Surcharge by Carrier ($)</h3><canvas id="cFuel"></canvas></div>
   <div class="card"><h3>Cost per Pound by Carrier ($/lb)</h3><canvas id="cCostLb"></canvas></div>
+  <div class="card"><h3>Top 10 Routes (by spend)</h3><canvas id="cRoutes"></canvas></div>
+  <div class="card"><h3>Amount Distribution ($)</h3><canvas id="cAmtDist"></canvas></div>
+</div>
+
+<div class="table-card">
+  <h3>&#9888; Potential Anomalies <span style="font-weight:400;font-size:10px;color:#6b7280">(invoices &gt; 2x the average for their carrier)</span></h3>
+  <table>
+    <thead><tr><th>File</th><th>Carrier</th><th>Amount</th><th>Carrier Avg</th><th>Ratio</th><th>Origin</th><th>Dest</th></tr></thead>
+    <tbody id="anomalyTable"></tbody>
+  </table>
 </div>
 
 <div class="table-card">
@@ -411,6 +421,63 @@ function updateDashboard() {{
     datasets: [{{ label: '$/lb', data: Object.values(carrierCostLb).map(v => v.toFixed(3)), backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ec4899'] }}]
   }}, {{ plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }});
 
+  // Top 10 routes by total spend
+  const routeSpend = {{}};
+  filtered.forEach(r => {{
+    if (r.origin && r.destination) {{
+      const route = r.origin + ' → ' + r.destination;
+      routeSpend[route] = (routeSpend[route] || 0) + r.due_amount;
+    }}
+  }});
+  const topRoutes = Object.entries(routeSpend).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  makeChart('cRoutes', 'bar', {{
+    labels: topRoutes.map(x => x[0]),
+    datasets: [{{ label: 'Total $', data: topRoutes.map(x => Math.round(x[1])), backgroundColor: '#06b6d4' }}]
+  }}, {{ indexAxis: 'y', plugins: {{ legend: {{ display: false }} }} }});
+
+  // Amount distribution histogram
+  const amtRanges = {{'$0-50': 0, '$51-150': 0, '$151-300': 0, '$301-500': 0, '$501-1000': 0, '$1000+': 0}};
+  filtered.forEach(r => {{
+    if (r.due_amount <= 50) amtRanges['$0-50']++;
+    else if (r.due_amount <= 150) amtRanges['$51-150']++;
+    else if (r.due_amount <= 300) amtRanges['$151-300']++;
+    else if (r.due_amount <= 500) amtRanges['$301-500']++;
+    else if (r.due_amount <= 1000) amtRanges['$501-1000']++;
+    else amtRanges['$1000+']++;
+  }});
+  makeChart('cAmtDist', 'bar', {{
+    labels: Object.keys(amtRanges),
+    datasets: [{{ label: 'Invoices', data: Object.values(amtRanges), backgroundColor: '#f59e0b' }}]
+  }}, {{ plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }});
+
+  // Anomaly detection: invoices > 2x carrier average
+  const carrierAvgs = {{}};
+  Object.keys(carrierCounts).forEach(c => {{
+    carrierAvgs[c] = carrierAmounts[c] / carrierCounts[c];
+  }});
+  const anomalies = filtered
+    .filter(r => r.due_amount > carrierAvgs[r.carrier] * 2 && r.due_amount > 100)
+    .sort((a, b) => (b.due_amount / carrierAvgs[b.carrier]) - (a.due_amount / carrierAvgs[a.carrier]))
+    .slice(0, 10);
+  const anomalyBody = document.getElementById('anomalyTable');
+  if (anomalies.length === 0) {{
+    anomalyBody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#059669;padding:16px">&#10003; No anomalies detected</td></tr>';
+  }} else {{
+    anomalyBody.innerHTML = anomalies.map(r => {{
+      const avg = carrierAvgs[r.carrier];
+      const ratio = (r.due_amount / avg).toFixed(1);
+      return `<tr>
+        <td>${{r.filename.substring(0, 45)}}</td>
+        <td><span class="badge badge-${{r.carrier}}">${{r.carrier}}</span></td>
+        <td style="font-weight:700;color:#dc2626">${{r.due_amount.toLocaleString('en', {{style:'currency', currency:'USD'}})}}</td>
+        <td>${{avg.toLocaleString('en', {{style:'currency', currency:'USD'}})}}</td>
+        <td style="font-weight:700">${{ratio}}x</td>
+        <td>${{r.origin}}</td>
+        <td>${{r.destination}}</td>
+      </tr>`;
+    }}).join('');
+  }}
+
   // Top 10 table with expandable charge details
   const top10 = [...filtered].sort((a, b) => b.due_amount - a.due_amount).slice(0, 10);
   const tbody = document.getElementById('topTable');
@@ -445,6 +512,15 @@ function updateDashboard() {{
 
 function toggleDetail(id) {{
   const row = document.getElementById(id);
+  const isOpening = !row.classList.contains('open');
+  // Close all other open details
+  if (isOpening) {{
+    document.querySelectorAll('.detail-row.open').forEach(r => {{
+      r.classList.remove('open');
+      const prev = r.previousElementSibling;
+      if (prev) prev.querySelector('td').innerHTML = '&#9654;';
+    }});
+  }}
   row.classList.toggle('open');
   const arrow = row.previousElementSibling.querySelector('td');
   arrow.innerHTML = row.classList.contains('open') ? '&#9660;' : '&#9654;';
