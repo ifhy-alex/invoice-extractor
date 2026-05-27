@@ -199,6 +199,17 @@ SELECT carrier, COUNT(*) as invoices,
 FROM invoices
 GROUP BY carrier;
 
+-- All charges for a specific invoice
+SELECT description, amount, code
+FROM invoice_charges
+WHERE filename = 'WC_AP001_001_of_001_1011_20251024114802.pdf';
+
+-- Total fuel surcharge by carrier
+SELECT carrier, COUNT(*) as items, ROUND(SUM(amount), 2) as total_fuel
+FROM invoice_charges
+WHERE description LIKE '%FUEL%'
+GROUP BY carrier;
+
 -- FedEx invoices with California Compliance
 SELECT filename, due_amount, charges_detail
 FROM invoices
@@ -226,6 +237,12 @@ WHERE origin != '' AND destination != ''
 GROUP BY route
 ORDER BY count DESC
 LIMIT 10;
+
+-- Charge type breakdown (from invoice_charges table)
+SELECT description, COUNT(*) as occurrences, ROUND(SUM(amount), 2) as total
+FROM invoice_charges
+GROUP BY description
+ORDER BY occurrences DESC;
 ```
 
 ---
@@ -234,10 +251,26 @@ LIMIT 10;
 
 | File | Description |
 |------|-------------|
-| `invoices.csv` | Flat CSV, one row per invoice, 24 columns |
-| `invoices.db` | SQLite with indexes on carrier, date, po_number, bl_number, invoice_no |
+| `invoices.csv` | Flat CSV, one row per invoice, 24 columns (charges as JSON string) |
+| `invoices_charges.csv` | Flat CSV, one row per charge line item (for Excel, Power BI, DB import) |
+| `invoices.json` | Full JSON with charges parsed as array of objects (for APIs, frontend) |
+| `invoices.db` | SQLite with tables: `invoices` + `invoice_charges` (one row per charge) |
 | `dashboard.html` | Interactive Chart.js dashboard (open in browser) |
 | `audit_report.html` | Verification report with PDF compare mode (open in browser) |
+
+### Charges Table Schema (SQLite & CSV)
+
+| Column | Description |
+|--------|-------------|
+| filename | Source PDF filename |
+| carrier | SAIA, DAYTON, FEDEX, AAA_COOPER |
+| invoice_no | Invoice/PRO number |
+| date | Invoice date |
+| description | Charge description (e.g. "FUEL SURCHARGE 7.25%") |
+| amount | Dollar amount (negative for discounts) |
+| code | Charge code if available (e.g. "FS") |
+| weight | Weight if part of the charge line |
+| rate | Rate if part of the charge line |
 
 ---
 

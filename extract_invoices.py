@@ -247,6 +247,9 @@ def extract_charges_fedex(text):
     less_disc = re.search(r'LESS DISCOUNT\s*\n[\.\d]+\s*\n([\d,\.]+)', block)
     if less_disc:
         amt = less_disc.group(1).rstrip('.-')
+        # Fix OCR: "1,767,53" -> "1,767.53" (last comma should be decimal point)
+        if re.match(r'^\d{1,3},\d{3},\d{2}$', amt):
+            amt = amt[::-1].replace(',', '.', 1)[::-1]  # replace last comma with dot
         charges.append({"description": "LESS DISCOUNT", "amount": f"-{amt}"})
 
     # Earned Discount (in Invoicing Summary section)
@@ -1063,6 +1066,7 @@ def process_pdf(pdf_path):
     # ── Manual overrides for known OCR errors ──────────────────────────────────
     MANUAL_OVERRIDES = {
         "WC_AP006_001_of_003_951_20251022111505.pdf": {"date": "10/16/25"},
+        "WC_AP003_001_of_001_595_20251003122658.pdf": {"date": "10/03/2025"},
     }
     if pdf_path.name in MANUAL_OVERRIDES:
         row.update(MANUAL_OVERRIDES[pdf_path.name])

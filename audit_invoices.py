@@ -142,6 +142,7 @@ def audit_row(row, text):
 # Files with manually corrected dates (OCR produced garbage)
 MANUAL_DATE_OVERRIDES = {
     "WC_AP006_001_of_003_951_20251022111505.pdf",
+    "WC_AP003_001_of_001_595_20251003122658.pdf",
 }
 
 
