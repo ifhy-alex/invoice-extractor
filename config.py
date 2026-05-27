@@ -6,6 +6,8 @@ Shared configuration between extract_invoices.py, audit_invoices.py and dashboar
 # ── Paths ──────────────────────────────────────────────────────────────────────
 PDF_DIR        = r"C:\Users\alexf\OneDrive\Escritorio\invoices"
 CSV_OUT        = r"C:\Users\alexf\OneDrive\Escritorio\invoices.csv"
+CSV_CHARGES    = r"C:\Users\alexf\OneDrive\Escritorio\invoices_charges.csv"
+JSON_OUT       = r"C:\Users\alexf\OneDrive\Escritorio\invoices.json"
 DB_OUT         = r"C:\Users\alexf\OneDrive\Escritorio\invoices.db"
 HTML_DASHBOARD = r"C:\Users\alexf\OneDrive\Escritorio\dashboard.html"
 HTML_AUDIT     = r"C:\Users\alexf\OneDrive\Escritorio\audit_report.html"

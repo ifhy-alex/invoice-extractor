@@ -28,7 +28,7 @@ from pathlib import Path
 import fitz
 from tqdm import tqdm
 
-from config import PDF_DIR, CSV_OUT, DB_OUT, ALL_FIELDS, CRITICAL_FIELDS
+from config import PDF_DIR, CSV_OUT, DB_OUT, ALL_FIELDS, CRITICAL_FIELDS, CSV_CHARGES, JSON_OUT
 
 
 def find(pattern, text, default="", flags=re.IGNORECASE):
@@ -220,6 +220,12 @@ def extract_charges_fedex(text):
         # Must look like a dollar amount
         if '.' not in amt and not amt.startswith('-'):
             continue
+        # Validate amount is reasonable (< $5000)
+        try:
+            if abs(float(amt.replace(',', ''))) > 5000:
+                continue
+        except ValueError:
+            continue
         charges.append({"description": desc, "amount": amt})
 
     # Fuel surcharge: "001047 FUEL SURCHG LTL SHPT 7.00% \n10.47"
@@ -229,9 +235,10 @@ def extract_charges_fedex(text):
         fuel_already = any("FUEL" in c["description"] for c in charges)
         if not fuel_already:
             fuel_amt = fuel.group(2)
-            # Validate: fuel surcharge should be >= $1.00
+            # Validate: fuel surcharge should be >= $1.00 and <= $500
             try:
-                if float(fuel_amt) >= 1.0:
+                fuel_val = float(fuel_amt)
+                if 1.0 <= fuel_val <= 500:
                     charges.append({"description": f"FUEL SURCHARGE {fuel.group(1)}", "amount": fuel_amt})
             except ValueError:
                 pass
@@ -284,8 +291,16 @@ def extract_charges_saia(text):
         valid_codes = ('FS', 'SS', 'LGATE', 'RESDEL', 'DISCN', 'NOT', 'CDA', 'DSDD', 'TPFO')
         if code not in valid_codes:
             continue
+        # Clean trailing comma/dot
+        amt = amt.rstrip(',.')
         # Skip if amount looks like an invoice number (>8 digits)
         if len(amt.replace(',', '').replace('.', '')) > 6:
+            continue
+        # Validate: must be a valid number and <= $5000
+        try:
+            if abs(float(amt.replace(',', ''))) > 5000:
+                continue
+        except ValueError:
             continue
         charges.append({"description": desc, "amount": amt, "code": code})
 
@@ -1060,6 +1075,8 @@ def save_db(rows, db_path):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=OFF")
     conn.execute("PRAGMA cache_size=10000")
+
+    # ── Main invoices table ────────────────────────────────────────────────────
     conn.execute("DROP TABLE IF EXISTS invoices")
     cols = ", ".join(f'"{f}" TEXT' for f in FIELDS)
     conn.execute(f"CREATE TABLE invoices ({cols})")
@@ -1070,12 +1087,116 @@ def save_db(rows, db_path):
         ON invoices(carrier, invoice_no)
         WHERE invoice_no != ''
     """)
-    # executemany: ~5x mas rapido que loop de execute
     ph = ", ".join("?" for _ in FIELDS)
     data = [[row.get(f, "") for f in FIELDS] for row in rows]
     conn.executemany(f"INSERT OR REPLACE INTO invoices VALUES ({ph})", data)
+
+    # ── Charges detail table (one row per charge line item) ────────────────────
+    conn.execute("DROP TABLE IF EXISTS invoice_charges")
+    conn.execute("""
+        CREATE TABLE invoice_charges (
+            filename TEXT,
+            carrier TEXT,
+            invoice_no TEXT,
+            date TEXT,
+            description TEXT,
+            amount REAL,
+            code TEXT,
+            weight TEXT,
+            rate TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_charges_filename ON invoice_charges(filename)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_charges_carrier ON invoice_charges(carrier)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_charges_desc ON invoice_charges(description)")
+
+    charges_data = []
+    for row in rows:
+        charges_str = row.get("charges_detail", "")
+        if not charges_str:
+            continue
+        try:
+            charges = json.loads(charges_str)
+            for c in charges:
+                amt_str = c.get("amount", "0").replace(",", "")
+                try:
+                    amt = float(amt_str)
+                except ValueError:
+                    amt = 0.0
+                charges_data.append((
+                    row.get("filename", ""),
+                    row.get("carrier", ""),
+                    row.get("invoice_no", ""),
+                    row.get("date", ""),
+                    c.get("description", ""),
+                    amt,
+                    c.get("code", ""),
+                    c.get("weight", ""),
+                    c.get("rate", ""),
+                ))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    conn.executemany(
+        "INSERT INTO invoice_charges VALUES (?,?,?,?,?,?,?,?,?)",
+        charges_data
+    )
+
     conn.commit()
     conn.close()
+
+
+def save_charges_csv(rows, csv_path):
+    """Save a flat CSV with one row per charge line item."""
+    charge_fields = ["filename", "carrier", "invoice_no", "date", "description", "amount", "code", "weight", "rate"]
+    charge_rows = []
+    for row in rows:
+        charges_str = row.get("charges_detail", "")
+        if not charges_str:
+            continue
+        try:
+            charges = json.loads(charges_str)
+            for c in charges:
+                charge_rows.append({
+                    "filename": row.get("filename", ""),
+                    "carrier": row.get("carrier", ""),
+                    "invoice_no": row.get("invoice_no", ""),
+                    "date": row.get("date", ""),
+                    "description": c.get("description", ""),
+                    "amount": c.get("amount", ""),
+                    "code": c.get("code", ""),
+                    "weight": c.get("weight", ""),
+                    "rate": c.get("rate", ""),
+                })
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=charge_fields)
+        writer.writeheader()
+        writer.writerows(charge_rows)
+    return len(charge_rows)
+
+
+def save_json(rows, json_path):
+    """Save all invoice data as JSON, with charges_detail parsed as objects."""
+    output = []
+    for row in rows:
+        obj = {k: v for k, v in row.items() if k != "charges_detail"}
+        # Parse charges_detail from JSON string to actual list
+        charges_str = row.get("charges_detail", "")
+        if charges_str:
+            try:
+                obj["charges"] = json.loads(charges_str)
+            except (json.JSONDecodeError, TypeError):
+                obj["charges"] = []
+        else:
+            obj["charges"] = []
+        output.append(obj)
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    return len(output)
 
 
 def get_already_processed(db_path):
@@ -1136,6 +1257,8 @@ def main():
         writer.writerows(all_rows)
 
     save_db(all_rows, DB_OUT)
+    n_charges = save_charges_csv(all_rows, CSV_CHARGES)
+    save_json(all_rows, JSON_OUT)
 
     from collections import Counter
     carriers = Counter(r["carrier"] for r in all_rows)
@@ -1143,9 +1266,11 @@ def main():
     confidence = Counter(r["extraction_confidence"] for r in all_rows)
 
     print(f"\nDone:")
-    print(f"  CSV : {CSV_OUT}")
-    print(f"  DB  : {DB_OUT}")
-    print(f"  Total: {len(all_rows)} invoices")
+    print(f"  CSV      : {CSV_OUT}")
+    print(f"  Charges  : {CSV_CHARGES} ({n_charges} line items)")
+    print(f"  JSON     : {JSON_OUT}")
+    print(f"  DB       : {DB_OUT} (tables: invoices, invoice_charges)")
+    print(f"  Total    : {len(all_rows)} invoices")
     if len(rows) != len(all_rows):
         print(f"  New: {len(rows)}")
     print(f"\nCarriers detected:")
