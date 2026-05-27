@@ -271,14 +271,21 @@ ORDER BY occurrences DESC;
 
 ## Output Files
 
-| File | Description |
-|------|-------------|
-| `invoices.csv` | Flat CSV, one row per invoice, 24 columns (charges as JSON string) |
-| `invoices_charges.csv` | Flat CSV, one row per charge line item (for Excel, Power BI, DB import) |
-| `invoices.json` | Full JSON with charges parsed as array of objects (for APIs, frontend) |
-| `invoices.db` | SQLite with tables: `invoices` + `invoice_charges` (one row per charge) |
-| `dashboard.html` | Interactive Chart.js dashboard (open in browser) |
-| `audit_report.html` | Verification report with PDF compare mode (open in browser) |
+| File | Description | How to Open |
+|------|-------------|-------------|
+| `invoices.json` | Full JSON with charges as nested arrays | Any text editor, VS Code, or programmatically |
+| `invoices.csv` | Flat CSV, one row per invoice, 24 columns (charges as JSON string) | Double-click → Excel |
+| `invoices_charges.csv` | Flat CSV, one row per charge line item | Double-click → Excel |
+| `invoices.db` | SQLite with tables: `invoices` + `invoice_charges` | [DB Browser for SQLite](https://sqlitebrowser.org/) or Python |
+| `dashboard.html` | Interactive Chart.js dashboard | Double-click → opens in browser |
+| `audit_report.html` | Verification report with PDF compare mode | Double-click → opens in browser |
+
+To open from the terminal:
+
+```cmd
+start output\dashboard.html
+start output\audit_report.html
+```
 
 ### Charges Table Schema (SQLite & CSV)
 
