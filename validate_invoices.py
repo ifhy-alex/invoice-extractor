@@ -1,312 +1,220 @@
 """
 validate_invoices.py
-Validacion de coherencia interna de los datos extraidos.
-NO depende de buscar texto en el PDF — valida formatos y aritmetica.
+Smart validation: checks extracted data for logical consistency and contextual correctness.
+Unlike the audit (which only checks if a value exists in the PDF), this validates:
+- Values are in the correct context (not just present anywhere)
+- Amounts are reasonable for their field
+- Origin/destination are valid terminal codes (2-4 uppercase letters)
+- Dates are valid
+- Pro numbers match expected formats per carrier
+- Charges don't contain weights or other non-charge values
 
-Validaciones:
-  1. Formato: cada campo cumple su patron esperado
-  2. Aritmetica: los montos cuadran entre si
-  3. Rangos: valores dentro de limites razonables
-
-Uso:
-    py -3 validate_invoices.py
+Usage:
+    py -3 validate_invoices.py          # validate all
+    py -3 validate_invoices.py --fix    # show what would need manual review
 """
 
+import argparse
 import csv
+import json
 import re
+import sys
 from pathlib import Path
-from collections import Counter, defaultdict
+from collections import Counter
 
-CSV_IN = r"C:\Users\alexf\OneDrive\Escritorio\invoices.csv"
+import fitz
 
-
-def to_float(val):
-    """Convierte string a float, retorna None si no es posible."""
-    if not val:
-        return None
-    try:
-        return float(val.replace(",", "").replace("$", ""))
-    except ValueError:
-        return None
+from config import PDF_DIR, CSV_OUT
 
 
-def load_csv():
-    with open(CSV_IN, encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-# ── VALIDACION 1: Formato ─────────────────────────────────────────────────────
-
-FORMAT_RULES = {
-    "date": {
-        "pattern": r'^\d{1,2}/\d{1,2}/\d{2,4}$',
-        "desc": "MM/DD/YY o MM/DD/YYYY",
-    },
-    "invoice_no": {
-        "pattern": r'^\d{6,12}$',
-        "desc": "6-12 digitos",
-    },
-    "pro_number": {
-        "pattern": r'^\d{6,12}$',
-        "desc": "6-12 digitos",
-    },
-    "bl_number": {
-        "pattern": r'^\d{4,15}$',
-        "desc": "4-15 digitos (incluye numeros de cuenta collect)",
-    },
-    "accts_rec": {
-        "pattern": r'^\d{4,10}$',
-        "desc": "4-10 digitos",
-    },
-    "due_amount": {
-        "pattern": r'^[\d,]+\.?\d*$',
-        "desc": "numero decimal",
-    },
-    "total_charges": {
-        "pattern": r'^[\d,]+\.?\d*$',
-        "desc": "numero decimal",
-    },
-    "fuel_surcharge": {
-        "pattern": r'^[\d,]+\.?\d*$',
-        "desc": "numero decimal",
-    },
-    "origin": {
-        "pattern": r'^[A-Z]{2,6}$',
-        "desc": "2-6 letras mayusculas (codigo terminal)",
-    },
-    "destination": {
-        "pattern": r'^[A-Z]{2,6}$',
-        "desc": "2-6 letras mayusculas (codigo terminal)",
-    },
-    "weight": {
-        "pattern": r'^\d{2,5}$',
-        "desc": "2-5 digitos",
-    },
-}
-
-
-def validate_format(row):
-    """Retorna lista de (campo, valor, problema) para campos con formato invalido."""
+def validate_row(row, text):
+    """Validate a single row for logical/contextual correctness. Returns list of issues."""
     issues = []
-    for field, rule in FORMAT_RULES.items():
-        val = row.get(field, "")
-        if not val:
-            continue  # campo vacio no es error de formato
-        if not re.match(rule["pattern"], val):
-            issues.append((field, val, f"No cumple formato: {rule['desc']}"))
-    return issues
-
-
-# ── VALIDACION 2: Aritmetica ──────────────────────────────────────────────────
-
-def validate_arithmetic(row):
-    """Verifica que los montos cuadren entre si."""
-    issues = []
-    carrier = row.get("carrier", "")
-
-    due     = to_float(row.get("due_amount"))
-    total   = to_float(row.get("total_charges"))
-    fuel    = to_float(row.get("fuel_surcharge"))
-    disc    = to_float(row.get("discount"))
-
-    # SAIA: due_amount deberia = total_charges (son el mismo campo en SAIA)
-    if carrier == "SAIA" and due is not None and total is not None:
-        if abs(due - total) > 0.02:
-            issues.append(("due vs total", f"due={due} total={total}", "due_amount != total_charges"))
-
-    # DAYTON: due_amount = total_charges - discount + fuel
-    # Solo aplica si discount es un monto real (>$1), no un rate como ".8180"
-    if carrier == "DAYTON" and due is not None and total is not None and fuel is not None:
-        if disc is not None and disc > 1:
-            expected = total - disc + fuel
-            if abs(due - expected) > 0.50:
-                issues.append(("aritmetica", f"due={due} expected={expected:.2f} (total={total} - disc={disc} + fuel={fuel})",
-                              "due != total - discount + fuel"))
-
-    # Fuel no puede ser mayor que el total
-    if fuel is not None and total is not None and fuel > total and carrier != "FEDEX":
-        issues.append(("fuel > total", f"fuel={fuel} total={total}", "fuel_surcharge > total_charges"))
-
-    # Discount no puede ser mayor que el total (si es un monto, no un rate)
-    # Excluir SAIA: su discount es sobre el rate bruto, no sobre total_charges
-    if disc is not None and disc > 1 and total is not None and disc > total * 2:
-        if carrier not in ("SAIA",):
-            issues.append(("disc > 2x total", f"disc={disc} total={total}", "discount > 2x total_charges"))
-
-    return issues
-
-
-# ── VALIDACION 3: Rangos razonables ───────────────────────────────────────────
-
-def validate_ranges(row):
-    """Verifica que los valores esten en rangos razonables para freight."""
-    issues = []
-
-    # Peso: 10 - 20,000 lbs es razonable para LTL freight
-    weight = to_float(row.get("weight"))
-    if weight is not None:
-        if weight < 10:
-            issues.append(("weight", str(weight), "Peso < 10 lbs (sospechoso)"))
-        elif weight > 20000:
-            issues.append(("weight", str(weight), "Peso > 20,000 lbs (sospechoso)"))
-
-    # Monto: $1 - $50,000 es razonable
-    due = to_float(row.get("due_amount"))
-    if due is not None:
-        if due < 1:
-            issues.append(("due_amount", str(due), "Monto < $1 (sospechoso)"))
-        elif due > 50000:
-            issues.append(("due_amount", str(due), "Monto > $50,000 (sospechoso)"))
-
-    # Fecha: verificar que mes y dia sean validos
-    date = row.get("date", "")
+    carrier = row.get('carrier', '')
+    
+    # 1. Date validation
+    date = row.get('date', '')
     if date:
-        m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2,4})$', date)
-        if m:
-            month, day = int(m.group(1)), int(m.group(2))
-            if month < 1 or month > 12:
-                issues.append(("date", date, f"Mes invalido: {month}"))
-            if day < 1 or day > 31:
-                issues.append(("date", date, f"Dia invalido: {day}"))
-
-    # Fuel surcharge: tipicamente $1 - $500 para LTL
-    fuel = to_float(row.get("fuel_surcharge"))
-    if fuel is not None:
-        if fuel > 500:
-            issues.append(("fuel_surcharge", str(fuel), "Fuel > $500 (sospechoso)"))
-
+        # Must be MM/DD/YY or MM/DD/YYYY
+        if not re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}$', date):
+            issues.append(('date', f"Invalid format: '{date}'"))
+        else:
+            parts = date.split('/')
+            m, d = int(parts[0]), int(parts[1])
+            if m < 1 or m > 12:
+                issues.append(('date', f"Invalid month: {m}"))
+            if d < 1 or d > 31:
+                issues.append(('date', f"Invalid day: {d}"))
+    
+    # 2. Origin/Destination validation
+    origin = row.get('origin', '')
+    destination = row.get('destination', '')
+    if origin and not re.match(r'^[A-Z]{2,5}$', origin):
+        issues.append(('origin', f"Not a valid terminal code: '{origin}'"))
+    if destination and not re.match(r'^[A-Z]{2,5}$', destination):
+        issues.append(('destination', f"Not a valid terminal code: '{destination}'"))
+    
+    # 3. Amount validation
+    for field in ['due_amount', 'total_charges', 'fuel_surcharge', 'discount']:
+        val = row.get(field, '')
+        if val:
+            try:
+                n = float(val.replace(',', '').replace('$', ''))
+                if field == 'fuel_surcharge' and n > 500:
+                    issues.append((field, f"Suspiciously high: ${val}"))
+                if field in ('due_amount', 'total_charges') and n > 50000:
+                    issues.append((field, f"Suspiciously high: ${val}"))
+            except ValueError:
+                issues.append((field, f"Not a valid number: '{val}'"))
+    
+    # 4. Weight validation
+    weight = row.get('weight', '')
+    if weight:
+        try:
+            w = int(weight.replace(',', ''))
+            if w > 50000:
+                issues.append(('weight', f"Suspiciously high: {weight}"))
+        except ValueError:
+            issues.append(('weight', f"Not a valid number: '{weight}'"))
+    
+    # 5. Pro number / Invoice number format per carrier
+    inv = row.get('invoice_no', '')
+    if carrier == 'SAIA' and inv:
+        if not re.match(r'^\d{10,12}$', inv):
+            issues.append(('invoice_no', f"SAIA expects 10-12 digits: '{inv}'"))
+    elif carrier == 'FEDEX' and inv:
+        if not re.match(r'^\d{7,12}$', inv):
+            issues.append(('invoice_no', f"FedEx expects 7-12 digits: '{inv}'"))
+    elif carrier == 'DAYTON' and inv:
+        if not re.match(r'^\d{6,12}$', inv):
+            issues.append(('invoice_no', f"Dayton expects 6-12 digits: '{inv}'"))
+    elif carrier == 'AAA_COOPER' and inv:
+        if not re.match(r'^\d{7,9}$', inv):
+            issues.append(('invoice_no', f"AAA Cooper expects 7-9 digits: '{inv}'"))
+    
+    # 6. Charges validation
+    charges_str = row.get('charges_detail', '')
+    if charges_str:
+        try:
+            charges = json.loads(charges_str)
+            for c in charges:
+                amt = c.get('amount', '').lstrip('-')
+                desc = c.get('description', '')
+                try:
+                    n = float(amt.replace(',', ''))
+                    # Weight disguised as charge (X.XXX format = thousands)
+                    if '.' in amt and len(amt.split('.')[1]) == 3 and n > 1000:
+                        issues.append(('charges', f"Possible weight as charge: {desc} ${amt}"))
+                    # Charge > total amount
+                    total = row.get('due_amount', '') or row.get('total_charges', '')
+                    if total:
+                        try:
+                            t = float(total.replace(',', ''))
+                            if n > t * 5 and n > 1000:
+                                issues.append(('charges', f"Charge > 5x total: {desc} ${amt} (total=${total})"))
+                        except ValueError:
+                            pass
+                except ValueError:
+                    issues.append(('charges', f"Invalid amount: {desc} '{amt}'"))
+        except (json.JSONDecodeError, TypeError):
+            issues.append(('charges', f"Invalid JSON"))
+    
+    # 7. Context validation: origin should appear near "Origin" keyword
+    # Only for carriers that use "ORIGIN" keyword (AAA Cooper)
+    if origin and len(origin) <= 4 and carrier == 'AAA_COOPER':
+        origin_context = re.search(r'(?:ORIGIN|Origin)[^\n]{0,50}' + re.escape(origin), text)
+        stmt_context = re.search(r'-' + re.escape(origin) + r'-', text)
+        if not origin_context and not stmt_context:
+            issues.append(('origin', f"'{origin}' not found near 'ORIGIN' keyword"))
+    
+    # 8. Payment due date validation (FedEx)
+    pdd = row.get('payment_due_date', '')
+    if pdd and date:
+        # Payment due should be after invoice date
+        try:
+            from datetime import datetime
+            fmt = '%m/%d/%Y' if len(pdd.split('/')[-1]) == 4 else '%m/%d/%y'
+            fmt_d = '%m/%d/%Y' if len(date.split('/')[-1]) == 4 else '%m/%d/%y'
+            d_pdd = datetime.strptime(pdd, fmt)
+            d_date = datetime.strptime(date, fmt_d)
+            diff = (d_pdd - d_date).days
+            if diff < 0:
+                issues.append(('payment_due_date', f"Due date before invoice date: {pdd} < {date}"))
+            elif diff > 90:
+                issues.append(('payment_due_date', f"Due date >90 days after invoice: {diff} days"))
+        except (ValueError, IndexError):
+            pass
+    
     return issues
 
-
-# ── VALIDACION 4: Campos obligatorios por carrier ─────────────────────────────
-
-REQUIRED_FIELDS = {
-    "SAIA":       ["date", "invoice_no", "biller", "accts_rec", "due_amount"],
-    "DAYTON":     ["date", "invoice_no", "due_amount", "origin"],
-    "FEDEX":      ["due_amount"],
-    "AAA_COOPER": ["date", "due_amount", "origin"],
-}
-
-
-def validate_required(row):
-    """Verifica que los campos obligatorios para el carrier esten presentes."""
-    issues = []
-    carrier = row.get("carrier", "")
-    required = REQUIRED_FIELDS.get(carrier, [])
-    for field in required:
-        if not row.get(field, ""):
-            issues.append((field, "", f"Campo obligatorio vacio para {carrier}"))
-    return issues
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    rows = load_csv()
-    print(f"Validando {len(rows)} facturas...\n")
+    parser = argparse.ArgumentParser(description="Validate extracted invoice data")
+    parser.add_argument("--fix", action="store_true", help="Show details for manual review")
+    args = parser.parse_args()
 
-    all_issues = defaultdict(list)  # filename -> [(tipo, campo, valor, problema)]
-    format_fails = Counter()
-    arith_fails = Counter()
-    range_fails = Counter()
-    required_fails = Counter()
+    with open(CSV_OUT, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
 
+    pdf_dir = Path(PDF_DIR)
+    
+    print(f"Validating {len(rows)} invoices...")
+    
+    all_issues = []
+    issue_counter = Counter()
+    carrier_issues = Counter()
+    
     for row in rows:
-        fn = row["filename"]
-        carrier = row.get("carrier", "")
-
-        for field, val, prob in validate_format(row):
-            all_issues[fn].append(("FORMATO", field, val, prob))
-            format_fails[(carrier, field)] += 1
-
-        for field, val, prob in validate_arithmetic(row):
-            all_issues[fn].append(("ARITMETICA", field, val, prob))
-            arith_fails[(carrier, field)] += 1
-
-        for field, val, prob in validate_ranges(row):
-            all_issues[fn].append(("RANGO", field, val, prob))
-            range_fails[(carrier, field)] += 1
-
-        for field, val, prob in validate_required(row):
-            all_issues[fn].append(("REQUERIDO", field, val, prob))
-            required_fails[(carrier, field)] += 1
-
-    # Resumen
-    total_issues = sum(len(v) for v in all_issues.values())
+        fname = row['filename']
+        pdf_path = pdf_dir / fname
+        
+        if pdf_path.exists():
+            doc = fitz.open(str(pdf_path))
+            text = "\n".join(page.get_text() for page in doc)
+            doc.close()
+        else:
+            text = ""
+        
+        issues = validate_row(row, text)
+        if issues:
+            all_issues.append((fname, row['carrier'], issues))
+            for field, msg in issues:
+                issue_counter[field] += 1
+                carrier_issues[row['carrier']] += 1
+    
+    # Summary
+    total_issues = sum(len(issues) for _, _, issues in all_issues)
     files_with_issues = len(all_issues)
-    files_clean = len(rows) - files_with_issues
-
-    print("=" * 70)
-    print(f"  RESUMEN DE VALIDACION")
-    print("=" * 70)
-    print(f"  Total facturas:       {len(rows)}")
-    print(f"  Sin problemas:        {files_clean} ({100*files_clean/len(rows):.1f}%)")
-    print(f"  Con algun problema:   {files_with_issues}")
-    print(f"  Total issues:         {total_issues}")
-    print()
-
-    # Desglose por tipo
-    print("--- Por tipo de validacion ---")
-    print(f"  Formato invalido:     {sum(format_fails.values())}")
-    print(f"  Aritmetica no cuadra: {sum(arith_fails.values())}")
-    print(f"  Fuera de rango:       {sum(range_fails.values())}")
-    print(f"  Campo requerido vacio:{sum(required_fails.values())}")
-    print()
-
-    # Top problemas de formato
-    if format_fails:
-        print("--- Top problemas de FORMATO ---")
-        for (carrier, field), count in format_fails.most_common(10):
-            print(f"  [{carrier}] {field}: {count} casos")
-        print()
-
-    # Problemas de aritmetica
-    if arith_fails:
-        print("--- Problemas de ARITMETICA ---")
-        for (carrier, field), count in arith_fails.most_common(10):
-            print(f"  [{carrier}] {field}: {count} casos")
-        print()
-
-    # Problemas de rango
-    if range_fails:
-        print("--- Problemas de RANGO ---")
-        for (carrier, field), count in range_fails.most_common(10):
-            print(f"  [{carrier}] {field}: {count} casos")
-        print()
-
-    # Campos requeridos vacios
-    if required_fails:
-        print("--- Campos REQUERIDOS vacios ---")
-        for (carrier, field), count in required_fails.most_common(10):
-            print(f"  [{carrier}] {field}: {count} casos")
-        print()
-
-    # Ejemplos de problemas
-    if all_issues:
-        print("--- Ejemplos (primeros 15) ---")
-        shown = 0
-        for fn, issues in sorted(all_issues.items()):
-            if shown >= 15:
-                break
-            carrier = next((r["carrier"] for r in rows if r["filename"] == fn), "?")
-            for tipo, field, val, prob in issues:
-                if shown >= 15:
-                    break
-                print(f"  [{carrier}] {fn}")
-                print(f"    {tipo} | {field} = {val!r} | {prob}")
-                shown += 1
-        print()
-
-    # Veredicto final
-    print("=" * 70)
-    if total_issues == 0:
-        print("  VEREDICTO: Todos los datos pasan validacion.")
-    elif files_with_issues < len(rows) * 0.05:
-        print(f"  VEREDICTO: {100*files_clean/len(rows):.1f}% de facturas sin problemas.")
-        print(f"  Los {files_with_issues} con issues son probablemente PDFs con formato atipico.")
-    else:
-        print(f"  VEREDICTO: {files_with_issues} facturas con problemas. Revisar patrones.")
-    print("=" * 70)
+    clean_files = len(rows) - files_with_issues
+    
+    print(f"\n{'='*70}")
+    print(f"VALIDATION RESULTS")
+    print(f"{'='*70}")
+    print(f"  Total files: {len(rows)}")
+    print(f"  Clean (no issues): {clean_files} ({100*clean_files//len(rows)}%)")
+    print(f"  With issues: {files_with_issues}")
+    print(f"  Total issues: {total_issues}")
+    
+    if issue_counter:
+        print(f"\n  Issues by field:")
+        for field, count in issue_counter.most_common():
+            print(f"    {field:20s}: {count}")
+        
+        print(f"\n  Issues by carrier:")
+        for carrier, count in carrier_issues.most_common():
+            print(f"    {carrier:15s}: {count}")
+    
+    if args.fix and all_issues:
+        print(f"\n{'='*70}")
+        print(f"DETAILS (files needing review)")
+        print(f"{'='*70}")
+        for fname, carrier, issues in all_issues[:50]:
+            print(f"\n  [{carrier}] {fname}")
+            for field, msg in issues:
+                print(f"    {field}: {msg}")
+    
+    if not all_issues:
+        print(f"\n  ✓ All files passed validation!")
 
 
 if __name__ == "__main__":

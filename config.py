@@ -17,6 +17,7 @@ ALL_FIELDS = [
     "due_amount", "total_charges", "fuel_surcharge", "discount",
     "origin", "destination", "weight",
     "shipper_name", "consignee_name", "payment_terms", "payment_due_date",
+    "charges_detail",
     "pages", "extraction_confidence", "error",
 ]
 
@@ -31,7 +32,7 @@ AUDIT_FIELDS = [
 CRITICAL_FIELDS = {
     "SAIA":       ["invoice_no", "due_amount", "origin", "destination", "date"],
     "DAYTON":     ["invoice_no", "due_amount", "origin", "date"],
-    "AAA_COOPER": ["pro_number", "due_amount", "origin", "destination"],
+    "AAA_COOPER": ["pro_number", "due_amount", "origin", "date"],
     "FEDEX":      ["invoice_no", "due_amount", "origin", "destination", "date"],
     "OTHER":      ["invoice_no", "due_amount"],
 }

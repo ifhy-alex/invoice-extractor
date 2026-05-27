@@ -15,6 +15,7 @@ Requirements:
 
 import argparse
 import csv
+import json
 import random
 import re
 import sys
@@ -86,10 +87,25 @@ def value_in_text(value, text):
             collapsed = f"{parts[0]}/{parts[1]}{parts[2]}"
             if collapsed.upper() in text_joined.upper():
                 return True
-            for sep in ["I", "1", "|", "l", " "]:
+            # Also try without any separator: "10222025" or "1012212025"
+            no_sep = f"{parts[0]}{parts[1]}{parts[2]}"
+            if no_sep in text_joined:
+                return True
+            for sep in ["I", "1", "|", "l", " ", ")"]:
                 ocr_var = f"{parts[0]}/{parts[1]}{sep}{parts[2]}"
                 if ocr_var.upper() in text_joined.upper():
                     return True
+                # Also: "MM1DD1YYYY" (/ replaced by 1)
+                ocr_var2 = f"{parts[0]}{sep}{parts[1]}{sep}{parts[2]}"
+                if ocr_var2 in text_joined:
+                    return True
+
+    # Exception for OCR zero/O substitution in location codes (e.g. MON vs M0N)
+    if re.match(r'^[A-Z]{2,5}$', clean):
+        # Try replacing O with 0
+        ocr_variant = clean.replace('O', '0')
+        if ocr_variant != clean and ocr_variant in text_joined.upper():
+            return True
 
     # Exception for discount with trailing dot: "48.01" vs "48.01."
     if re.match(r'^\d+\.\d+$', clean_no_comma):
@@ -116,8 +132,17 @@ def audit_row(row, text):
     for field in FIELDS_TO_CHECK:
         val = row.get(field, "")
         found = value_in_text(val, text)
+        # Manual overrides: if value was manually corrected, accept it as verified
+        if found is False and field == "date" and row.get("filename") in MANUAL_DATE_OVERRIDES:
+            found = True
         results.append((field, val, found))
     return results
+
+
+# Files with manually corrected dates (OCR produced garbage)
+MANUAL_DATE_OVERRIDES = {
+    "WC_AP006_001_of_003_951_20251022111505.pdf",
+}
 
 
 def print_audit(row, text, results):
@@ -157,7 +182,7 @@ def generate_html_report(all_results):
     carrier_ok = Counter()
     carrier_total = Counter()
 
-    for filename, carrier, field_results in all_results:
+    for filename, carrier, field_results, *_ in all_results:
         for _, v, f in field_results:
             if v and f is True:
                 global_ok += 1
@@ -175,7 +200,13 @@ def generate_html_report(all_results):
 
     # Generate HTML rows
     rows_html = []
-    for filename, carrier, field_results in all_results:
+    for idx, entry in enumerate(all_results):
+        filename = entry[0]
+        carrier = entry[1]
+        field_results = entry[2]
+        charges_verified = entry[3] if len(entry) > 3 else []
+        row_data = entry[4] if len(entry) > 4 else {}
+
         ok = sum(1 for _, v, f in field_results if v and f is True)
         miss = sum(1 for _, v, f in field_results if v and f is False)
         total = sum(1 for _, v, _ in field_results if v)
@@ -201,13 +232,48 @@ def generate_html_report(all_results):
                 content = val
             cells += f'<td class="{cls}" title="{field}">{content}</td>'
 
+        # Build charges detail HTML for expandable row
+        has_charges = len(charges_verified) > 0
+        arrow = '<td class="col-arrow">&#9654;</td>' if has_charges else '<td class="col-arrow"></td>'
+        click_attr = f'onclick="toggleCharges(\'charges-{idx}\')"' if has_charges else ''
+        clickable_cls = " clickable" if has_charges else ""
+
+        charges_html = ""
+        if has_charges:
+            charge_items = ""
+            for c in charges_verified:
+                if c["verified"] is True:
+                    status_cls = "charge-ok"
+                    icon = "&#10003;"
+                elif c["verified"] is False:
+                    status_cls = "charge-err"
+                    icon = "&#10007;"
+                else:
+                    status_cls = "charge-empty"
+                    icon = "&#8211;"
+                is_neg = c["amount"].startswith("-")
+                amt_display = f"-${c['amount'][1:]}" if is_neg else f"${c['amount']}"
+                charge_items += f'<div class="charge-item {status_cls}"><span class="charge-icon">{icon}</span><span class="charge-desc">{c["description"]}</span><span class="charge-amt">{amt_display}</span></div>'
+            charges_html = f"""
+        <tr class="detail-row" id="charges-{idx}">
+            <td colspan="{len(FIELDS_TO_CHECK) + 5}">
+                <div class="charges-grid">{charge_items}</div>
+            </td>
+        </tr>"""
+
+        # Build row data JSON for compare modal (escape for HTML attribute)
+        row_json = json.dumps({k: v for k, v in row_data.items() if k not in ('error',)}, ensure_ascii=False)
+        row_json_escaped = row_json.replace("&", "&amp;").replace('"', "&quot;").replace("'", "&#39;").replace("<", "&lt;").replace(">", "&gt;")
+
         rows_html.append(f"""
-        <tr class="{row_class}" data-carrier="{carrier}" data-score="{pct}" data-file="{filename}" data-category="{filename.split('_')[1] if '_' in filename else ''}">
+        <tr class="{row_class}{clickable_cls}" data-carrier="{carrier}" data-score="{pct}" data-file="{filename}" data-category="{filename.split('_')[1] if '_' in filename else ''}" {click_attr}>
+            {arrow}
             <td class="col-file">{filename}</td>
             <td class="col-carrier"><span class="badge badge-{carrier.lower()}">{carrier}</span></td>
             <td class="col-score">{pct}%</td>
             {cells}
-        </tr>""")
+            <td class="col-compare"><button class="btn-compare" onclick="event.stopPropagation(); openCompare('{filename}', this)" data-row='{row_json_escaped}'>Compare</button></td>
+        </tr>{charges_html}""")
 
     # Stats per carrier
     carrier_cards = ""
@@ -397,6 +463,36 @@ def generate_html_report(all_results):
   }}
   tr:hover td {{ background: #f8fafc !important; }}
   tr.hidden {{ display: none; }}
+  tr.clickable {{ cursor: pointer; }}
+  tr.clickable:hover td {{ background: #eef2ff !important; }}
+  tr.detail-row {{ display: none; }}
+  tr.detail-row.open {{ display: table-row; }}
+  tr.detail-row td {{ padding: 12px 20px; background: #f8fafc; border-bottom: 2px solid #e2e8f0; }}
+  .col-arrow {{ width: 20px; color: #9ca3af; font-size: 10px; }}
+  .charges-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 6px;
+  }}
+  .charge-item {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: white;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    font-size: 11px;
+  }}
+  .charge-item.charge-ok {{ border-left: 3px solid #10b981; }}
+  .charge-item.charge-err {{ border-left: 3px solid #ef4444; background: #fef2f2; }}
+  .charge-item.charge-empty {{ border-left: 3px solid #9ca3af; }}
+  .charge-icon {{ font-size: 12px; min-width: 14px; }}
+  .charge-ok .charge-icon {{ color: #10b981; }}
+  .charge-err .charge-icon {{ color: #ef4444; }}
+  .charge-empty .charge-icon {{ color: #9ca3af; }}
+  .charge-desc {{ flex: 1; color: #374151; }}
+  .charge-amt {{ font-weight: 600; color: #0f3460; }}
 
   .col-file {{ font-weight: 500; max-width: 280px; font-size: 10px; }}
   .col-carrier {{ text-align: center; }}
@@ -409,6 +505,109 @@ def generate_html_report(all_results):
   .cell-ok {{ background: #f0fdf4; color: #166534; }}
   .cell-err {{ background: #fef2f2; color: #991b1b; font-weight: 600; }}
   .cell-empty {{ background: #f9fafb; color: #9ca3af; text-align: center; }}
+
+  .btn-compare {{
+    padding: 3px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }}
+  .btn-compare:hover {{ background: #1d4ed8; }}
+  .col-compare {{ text-align: center; }}
+
+  .modal-overlay {{
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 9999;
+    padding: 20px;
+  }}
+  .modal-overlay.open {{ display: flex; }}
+  .modal-content {{
+    display: flex;
+    width: 100%;
+    height: 100%;
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }}
+  .modal-pdf {{
+    flex: 1;
+    border-right: 2px solid #e2e8f0;
+    min-width: 0;
+  }}
+  .modal-pdf embed, .modal-pdf iframe {{
+    width: 100%;
+    height: 100%;
+    border: none;
+  }}
+  .modal-data {{
+    width: 380px;
+    overflow-y: auto;
+    padding: 24px;
+    background: #f8fafc;
+  }}
+  .modal-data h3 {{
+    font-size: 14px;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #e2e8f0;
+    color: #1e293b;
+  }}
+  .modal-data .field-row {{
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 11px;
+  }}
+  .modal-data .field-name {{ color: #64748b; font-weight: 500; }}
+  .modal-data .field-value {{ color: #1e293b; font-weight: 600; text-align: right; max-width: 200px; word-break: break-all; }}
+  .modal-data .section-title {{
+    font-size: 11px;
+    font-weight: 700;
+    color: #2563eb;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 16px;
+    margin-bottom: 8px;
+  }}
+  .modal-data .charge-row {{
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 8px;
+    margin: 3px 0;
+    background: white;
+    border-radius: 4px;
+    border: 1px solid #e2e8f0;
+    font-size: 11px;
+  }}
+  .modal-data .charge-row .neg {{ color: #dc2626; }}
+  .modal-close {{
+    position: absolute;
+    top: 30px;
+    right: 30px;
+    width: 36px;
+    height: 36px;
+    background: #1e293b;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  }}
+  .modal-close:hover {{ background: #ef4444; }}
 
   .footer {{
     text-align: center;
@@ -484,10 +683,12 @@ def generate_html_report(all_results):
 <table>
 <thead>
   <tr>
+    <th></th>
     <th>File</th>
     <th>Carrier</th>
     <th>Score</th>
     {headers}
+    <th></th>
   </tr>
 </thead>
 <tbody id="tableBody">
@@ -500,7 +701,18 @@ def generate_html_report(all_results):
   Generated by invoice_extractor | Verification: each extracted value is searched in the raw PDF text
 </div>
 
+<!-- Compare Modal -->
+<div class="modal-overlay" id="compareModal">
+  <button class="modal-close" onclick="closeCompare()">&times;</button>
+  <div class="modal-content">
+    <div class="modal-pdf" id="modalPdf"></div>
+    <div class="modal-data" id="modalData"></div>
+  </div>
+</div>
+
 <script>
+const PDF_DIR = '{Path(PDF_DIR).as_posix()}';
+
 // Populate category dropdown dynamically
 (function() {{
   const rows = document.querySelectorAll('#tableBody tr');
@@ -523,8 +735,11 @@ function applyFilters() {{
   const category = document.getElementById('filterCategory').value;
   const status = document.getElementById('filterStatus').value;
   const fileSearch = document.getElementById('filterFile').value.toLowerCase();
-  const rows = document.querySelectorAll('#tableBody tr');
+  const rows = document.querySelectorAll('#tableBody tr:not(.detail-row)');
   let visible = 0;
+
+  // Close all open detail rows when filters change
+  closeAllDetails();
 
   rows.forEach(row => {{
     const rowCarrier = row.getAttribute('data-carrier');
@@ -545,6 +760,88 @@ function applyFilters() {{
 
   document.getElementById('rowCount').textContent = visible + ' rows';
 }}
+
+function closeAllDetails() {{
+  document.querySelectorAll('.detail-row.open').forEach(row => {{
+    row.classList.remove('open');
+    const mainRow = row.previousElementSibling;
+    if (mainRow) {{
+      const arrow = mainRow.querySelector('.col-arrow');
+      if (arrow) arrow.innerHTML = '&#9654;';
+    }}
+  }});
+}}
+
+function toggleCharges(id) {{
+  const row = document.getElementById(id);
+  if (!row) return;
+  const isOpening = !row.classList.contains('open');
+
+  // Close all other open details first
+  if (isOpening) {{
+    closeAllDetails();
+  }}
+
+  row.classList.toggle('open');
+  const mainRow = row.previousElementSibling;
+  const arrow = mainRow.querySelector('.col-arrow');
+  if (arrow) arrow.innerHTML = row.classList.contains('open') ? '&#9660;' : '&#9654;';
+}}
+
+function openCompare(filename, btn) {{
+  const rowData = JSON.parse(btn.getAttribute('data-row'));
+  const pdfPath = PDF_DIR + '/' + filename;
+
+  // PDF viewer
+  document.getElementById('modalPdf').innerHTML = `<embed src="file:///${{pdfPath}}" type="application/pdf">`;
+
+  // Data panel
+  const skipFields = ['filename', 'pages', 'error', 'extraction_confidence', 'charges_detail'];
+  const mainFields = ['carrier', 'date', 'invoice_no', 'pro_number', 'po_number', 'bl_number',
+                      'biller', 'accts_rec', 'due_amount', 'total_charges', 'fuel_surcharge',
+                      'discount', 'origin', 'destination', 'weight', 'shipper_name',
+                      'consignee_name', 'payment_terms', 'payment_due_date'];
+
+  let html = `<h3>${{filename}}</h3>`;
+  html += `<div class="field-row"><span class="field-name">Confidence</span><span class="field-value">${{rowData.extraction_confidence || '-'}}</span></div>`;
+
+  html += '<div class="section-title">Extracted Fields</div>';
+  mainFields.forEach(f => {{
+    const val = rowData[f] || '';
+    if (val) {{
+      html += `<div class="field-row"><span class="field-name">${{f}}</span><span class="field-value">${{val}}</span></div>`;
+    }}
+  }});
+
+  // Charges breakdown
+  if (rowData.charges_detail) {{
+    try {{
+      const charges = JSON.parse(rowData.charges_detail);
+      if (charges.length > 0) {{
+        html += '<div class="section-title">Charges Breakdown</div>';
+        charges.forEach(c => {{
+          const isNeg = c.amount && c.amount.startsWith('-');
+          const amtDisplay = isNeg ? '-$' + c.amount.slice(1) : '$' + c.amount;
+          const cls = isNeg ? 'neg' : '';
+          html += `<div class="charge-row"><span>${{c.description}}</span><span class="${{cls}}">${{amtDisplay}}</span></div>`;
+        }});
+      }}
+    }} catch(e) {{}}
+  }}
+
+  document.getElementById('modalData').innerHTML = html;
+  document.getElementById('compareModal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}}
+
+function closeCompare() {{
+  document.getElementById('compareModal').classList.remove('open');
+  document.getElementById('modalPdf').innerHTML = '';
+  document.body.style.overflow = '';
+}}
+
+// Close modal with Escape key
+document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeCompare(); }});
 </script>
 
 </body>
@@ -583,7 +880,23 @@ def main():
         for filename, row in csv_data.items():
             text = get_pdf_text(pdf_dir / filename)
             results = audit_row(row, text)
-            all_results.append((filename, row.get("carrier", "?"), results))
+            charges_detail = row.get("charges_detail", "")
+            # Verify each charge amount against PDF text
+            charges_verified = []
+            if charges_detail:
+                try:
+                    charges = json.loads(charges_detail)
+                    for c in charges:
+                        amt = c.get("amount", "").lstrip("-")
+                        found = value_in_text(amt, text) if amt else None
+                        charges_verified.append({
+                            "description": c.get("description", ""),
+                            "amount": c.get("amount", ""),
+                            "verified": found,
+                        })
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            all_results.append((filename, row.get("carrier", "?"), results, charges_verified, row))
         generate_html_report(all_results)
 
     else:

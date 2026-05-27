@@ -61,6 +61,7 @@ def main():
             "consignee_name": r.get("consignee_name", ""),
             "category": r["filename"].split("_")[1] if "_" in r["filename"] else "",
             "confidence": r.get("extraction_confidence", ""),
+            "charges_detail": r.get("charges_detail", ""),
         })
 
     html = f"""<!DOCTYPE html>
@@ -167,6 +168,29 @@ def main():
   th {{ background: #f8fafc; padding: 8px 10px; text-align: left; font-weight: 600; color: #475569; }}
   td {{ padding: 8px 10px; border-bottom: 1px solid #f1f5f9; }}
   tr:hover td {{ background: #f8fafc; }}
+  tr.clickable {{ cursor: pointer; }}
+  tr.clickable:hover td {{ background: #eef2ff; }}
+  tr.detail-row {{ display: none; }}
+  tr.detail-row.open {{ display: table-row; }}
+  tr.detail-row td {{ padding: 12px 20px; background: #f8fafc; border-bottom: 2px solid #e2e8f0; }}
+  .charges-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 8px;
+  }}
+  .charge-item {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    background: white;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    font-size: 11px;
+  }}
+  .charge-item .charge-desc {{ color: #374151; font-weight: 500; }}
+  .charge-item .charge-amt {{ font-weight: 700; color: #0f3460; }}
+  .charge-item .charge-amt.negative {{ color: #dc2626; }}
 
   .badge {{
     display: inline-block; padding: 2px 8px; border-radius: 10px;
@@ -202,12 +226,9 @@ def main():
   <select id="fOrigin" onchange="updateDashboard()">
     <option value="">All</option>
   </select>
-  <label>Confidence:</label>
-  <select id="fConfidence" onchange="updateDashboard()">
+  <label>Destination:</label>
+  <select id="fDest" onchange="updateDashboard()">
     <option value="">All</option>
-    <option value="HIGH">HIGH</option>
-    <option value="MEDIUM">MEDIUM</option>
-    <option value="LOW">LOW</option>
   </select>
   <span class="filter-info" id="filterInfo">{len(rows)} invoices</span>
 </div>
@@ -215,10 +236,12 @@ def main():
 <div class="kpis">
   <div class="kpi green"><div class="value" id="kpiTotal">-</div><div class="label">Total Billed</div></div>
   <div class="kpi blue"><div class="value" id="kpiCount">-</div><div class="label">Invoices</div></div>
-  <div class="kpi purple"><div class="value" id="kpiAvg">-</div><div class="label">Average</div></div>
-  <div class="kpi orange"><div class="value" id="kpiFuel">-</div><div class="label">Avg Fuel</div></div>
-  <div class="kpi"><div class="value" id="kpiWeight">-</div><div class="label">Avg Weight</div></div>
-  <div class="kpi"><div class="value" id="kpiOrigins">-</div><div class="label">Origins</div></div>
+  <div class="kpi purple"><div class="value" id="kpiAvg">-</div><div class="label">Avg Invoice</div></div>
+  <div class="kpi orange"><div class="value" id="kpiFuel">-</div><div class="label">Total Fuel</div></div>
+  <div class="kpi"><div class="value" id="kpiWeight">-</div><div class="label">Total Weight</div></div>
+  <div class="kpi"><div class="value" id="kpiDiscount">-</div><div class="label">Total Discounts</div></div>
+  <div class="kpi"><div class="value" id="kpiOrigins">-</div><div class="label">Routes</div></div>
+  <div class="kpi"><div class="value" id="kpiMax">-</div><div class="label">Max Invoice</div></div>
 </div>
 
 <div class="grid">
@@ -228,12 +251,14 @@ def main():
   <div class="card"><h3>Top 15 Destinations</h3><canvas id="cDest"></canvas></div>
   <div class="card"><h3>Weight Distribution (lbs)</h3><canvas id="cWeight"></canvas></div>
   <div class="card"><h3>Amount by Date</h3><canvas id="cTimeline"></canvas></div>
+  <div class="card"><h3>Fuel Surcharge by Carrier ($)</h3><canvas id="cFuel"></canvas></div>
+  <div class="card"><h3>Cost per Pound by Carrier ($/lb)</h3><canvas id="cCostLb"></canvas></div>
 </div>
 
 <div class="table-card">
-  <h3>Top 10 Invoices by Amount</h3>
+  <h3>Top 10 Invoices by Amount <span style="font-weight:400;font-size:10px;color:#6b7280">(click a row to see charge breakdown)</span></h3>
   <table>
-    <thead><tr><th>File</th><th>Carrier</th><th>Amount</th><th>Origin</th><th>Destination</th><th>Weight</th></tr></thead>
+    <thead><tr><th></th><th>File</th><th>Carrier</th><th>Amount</th><th>Origin</th><th>Destination</th><th>Weight</th></tr></thead>
     <tbody id="topTable"></tbody>
   </table>
 </div>
@@ -245,10 +270,13 @@ const COLORS = ['#3b82f6','#10b981','#f59e0b','#ec4899','#8b5cf6','#06b6d4','#64
 // Populate dropdowns
 const categories = [...new Set(ALL_DATA.map(r => r.category))].sort();
 const origins = [...new Set(ALL_DATA.map(r => r.origin).filter(Boolean))].sort();
+const destinations = [...new Set(ALL_DATA.map(r => r.destination).filter(Boolean))].sort();
 const selCat = document.getElementById('fCategory');
 categories.forEach(c => {{ const o = document.createElement('option'); o.value = c; o.textContent = c; selCat.appendChild(o); }});
 const selOrig = document.getElementById('fOrigin');
 origins.forEach(c => {{ const o = document.createElement('option'); o.value = c; o.textContent = c; selOrig.appendChild(o); }});
+const selDest = document.getElementById('fDest');
+destinations.forEach(c => {{ const o = document.createElement('option'); o.value = c; o.textContent = c; selDest.appendChild(o); }});
 
 // Charts
 let charts = {{}};
@@ -261,31 +289,33 @@ function updateDashboard() {{
   const carrier = document.getElementById('fCarrier').value;
   const category = document.getElementById('fCategory').value;
   const origin = document.getElementById('fOrigin').value;
-  const confidence = document.getElementById('fConfidence').value;
+  const dest = document.getElementById('fDest').value;
 
   let filtered = ALL_DATA;
   if (carrier) filtered = filtered.filter(r => r.carrier === carrier);
   if (category) filtered = filtered.filter(r => r.category === category);
   if (origin) filtered = filtered.filter(r => r.origin === origin);
-  if (confidence) filtered = filtered.filter(r => r.confidence === confidence);
+  if (dest) filtered = filtered.filter(r => r.destination === dest);
 
   document.getElementById('filterInfo').textContent = filtered.length + ' invoices';
 
   // KPIs
   const totalAmt = filtered.reduce((s, r) => s + r.due_amount, 0);
   const avgAmt = filtered.length ? totalAmt / filtered.length : 0;
-  const fuels = filtered.filter(r => r.fuel_surcharge > 0);
-  const avgFuel = fuels.length ? fuels.reduce((s, r) => s + r.fuel_surcharge, 0) / fuels.length : 0;
-  const weights = filtered.filter(r => r.weight > 0);
-  const avgWeight = weights.length ? weights.reduce((s, r) => s + r.weight, 0) / weights.length : 0;
-  const uniqueOrigins = new Set(filtered.map(r => r.origin).filter(Boolean)).size;
+  const totalFuel = filtered.reduce((s, r) => s + r.fuel_surcharge, 0);
+  const totalWeight = filtered.reduce((s, r) => s + r.weight, 0);
+  const totalDiscount = filtered.reduce((s, r) => s + r.discount, 0);
+  const uniqueRoutes = new Set(filtered.map(r => r.origin + '-' + r.destination).filter(r => r !== '-')).size;
+  const maxAmt = filtered.length ? Math.max(...filtered.map(r => r.due_amount)) : 0;
 
   document.getElementById('kpiTotal').textContent = '$' + totalAmt.toLocaleString('en', {{maximumFractionDigits: 0}});
   document.getElementById('kpiCount').textContent = filtered.length;
   document.getElementById('kpiAvg').textContent = '$' + avgAmt.toLocaleString('en', {{maximumFractionDigits: 0}});
-  document.getElementById('kpiFuel').textContent = '$' + avgFuel.toFixed(2);
-  document.getElementById('kpiWeight').textContent = Math.round(avgWeight) + ' lbs';
-  document.getElementById('kpiOrigins').textContent = uniqueOrigins;
+  document.getElementById('kpiFuel').textContent = '$' + totalFuel.toLocaleString('en', {{maximumFractionDigits: 0}});
+  document.getElementById('kpiWeight').textContent = (totalWeight / 1000).toFixed(0) + 'K lbs';
+  document.getElementById('kpiDiscount').textContent = '$' + totalDiscount.toLocaleString('en', {{maximumFractionDigits: 0}});
+  document.getElementById('kpiOrigins').textContent = uniqueRoutes;
+  document.getElementById('kpiMax').textContent = '$' + maxAmt.toLocaleString('en', {{maximumFractionDigits: 0}});
 
   // Carrier chart
   const carrierCounts = {{}};
@@ -358,11 +388,48 @@ function updateDashboard() {{
     }}]
   }}, {{ scales: {{ x: {{ ticks: {{ maxRotation: 45 }} }} }} }});
 
-  // Top 10 table
+  // Fuel surcharge by carrier
+  const carrierFuel = {{}};
+  filtered.forEach(r => {{ carrierFuel[r.carrier] = (carrierFuel[r.carrier] || 0) + r.fuel_surcharge; }});
+  makeChart('cFuel', 'bar', {{
+    labels: Object.keys(carrierFuel),
+    datasets: [{{ label: 'Fuel $', data: Object.values(carrierFuel).map(v => Math.round(v)), backgroundColor: ['#f59e0b','#10b981','#3b82f6','#ec4899'] }}]
+  }}, {{ plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }});
+
+  // Cost per pound by carrier
+  const carrierCostLb = {{}};
+  ['SAIA','DAYTON','FEDEX','AAA_COOPER'].forEach(c => {{
+    const cRows = filtered.filter(r => r.carrier === c && r.weight > 0 && r.due_amount > 0);
+    if (cRows.length > 0) {{
+      const totalCost = cRows.reduce((s, r) => s + r.due_amount, 0);
+      const totalWt = cRows.reduce((s, r) => s + r.weight, 0);
+      carrierCostLb[c] = totalCost / totalWt;
+    }}
+  }});
+  makeChart('cCostLb', 'bar', {{
+    labels: Object.keys(carrierCostLb),
+    datasets: [{{ label: '$/lb', data: Object.values(carrierCostLb).map(v => v.toFixed(3)), backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ec4899'] }}]
+  }}, {{ plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }});
+
+  // Top 10 table with expandable charge details
   const top10 = [...filtered].sort((a, b) => b.due_amount - a.due_amount).slice(0, 10);
   const tbody = document.getElementById('topTable');
-  tbody.innerHTML = top10.map(r => `
-    <tr>
+  tbody.innerHTML = top10.map((r, i) => {{
+    let chargesHtml = '<div style="color:#9ca3af;font-size:11px">No charge details available</div>';
+    if (r.charges_detail) {{
+      try {{
+        const charges = JSON.parse(r.charges_detail);
+        chargesHtml = '<div class="charges-grid">' + charges.map(c => {{
+          const isNeg = c.amount.startsWith('-');
+          const amtClass = isNeg ? 'charge-amt negative' : 'charge-amt';
+          const amtDisplay = isNeg ? '-$' + c.amount.slice(1) : '$' + c.amount;
+          return `<div class="charge-item"><span class="charge-desc">${{c.description}}</span><span class="${{amtClass}}">${{amtDisplay}}</span></div>`;
+        }}).join('') + '</div>';
+      }} catch(e) {{}}
+    }}
+    return `
+    <tr class="clickable" onclick="toggleDetail('detail-${{i}}')">
+      <td style="width:20px;color:#9ca3af">&#9654;</td>
       <td>${{r.filename.substring(0, 40)}}</td>
       <td><span class="badge badge-${{r.carrier}}">${{r.carrier}}</span></td>
       <td>${{r.due_amount.toLocaleString('en', {{style:'currency', currency:'USD'}})}}</td>
@@ -370,7 +437,17 @@ function updateDashboard() {{
       <td>${{r.destination}}</td>
       <td>${{r.weight ? Math.round(r.weight) + ' lbs' : '-'}}</td>
     </tr>
-  `).join('');
+    <tr class="detail-row" id="detail-${{i}}">
+      <td colspan="7">${{chargesHtml}}</td>
+    </tr>`;
+  }}).join('');
+}}
+
+function toggleDetail(id) {{
+  const row = document.getElementById(id);
+  row.classList.toggle('open');
+  const arrow = row.previousElementSibling.querySelector('td');
+  arrow.innerHTML = row.classList.contains('open') ? '&#9660;' : '&#9654;';
 }}
 
 // Initial render
