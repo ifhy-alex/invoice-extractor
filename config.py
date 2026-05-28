@@ -33,7 +33,9 @@ ALL_FIELDS = [
     "po_number", "bl_number", "biller", "accts_rec",
     "due_amount", "total_charges", "fuel_surcharge", "discount",
     "origin", "destination", "weight",
-    "shipper_name", "consignee_name", "payment_terms", "payment_due_date",
+    "shipper_name", "shipper_zip", "consignee_name", "consignee_zip",
+    "freight_class",
+    "payment_terms", "payment_due_date",
     "charges_detail",
     "pages", "extraction_confidence", "error",
 ]
