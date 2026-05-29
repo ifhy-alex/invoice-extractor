@@ -746,6 +746,17 @@ def extract_saia(text, doc=None):
                 ship_zips = re.findall(r'[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b', ship_block)
                 if ship_zips:
                     shipper_zip = ship_zips[0]
+    if not shipper_zip:
+        # Broader fallback: look for shipper zip in the address area (after DRIVER, before "No. PCS")
+        pcs_idx = text.find("No. PCS")
+        if pcs_idx > 0:
+            addr_area = text[:pcs_idx]
+            # Find all state+zip, exclude 54402 (bill-to) and consignee_zip
+            all_zips = re.findall(r'[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b', addr_area)
+            for z in all_zips:
+                if z != '54402' and z != consignee_zip and not z.startswith('54402'):
+                    shipper_zip = z
+                    break
 
     # Freight class: various patterns
     freight_class = ""
@@ -1248,7 +1259,12 @@ def extract_fedex(text):
     # Layout: "CONSIGNEE_NAME \nWAUSAU COATED PROD \nADDRESS \nPO BOX 904 \nCITY ST ZIP \nWAUSAU WI 54402"
     # The consignee zip is the FIRST zip that is NOT 54402 (bill-to)
     consignee_zip = ""
-    cons_section = re.search(r'Consignee\s*\n(.*?)(?:CHA|PIECES|PALLETS|DESC|PAPER|TRANSFER|GUMMED)', text, re.DOTALL)
+    cons_section = re.search(r'Consignee\s*\n(.*?)(?:\n(?:CHA|PIECES|PALLETS|DESC|\d+\s*\n(?:PAPER|TRANSFER)))', text, re.DOTALL)
+    if not cons_section:
+        # Fallback: take 400 chars after Consignee
+        cons_idx = text.find("Consignee")
+        if cons_idx >= 0:
+            cons_section = re.match(r'(.*)', text[cons_idx+10:cons_idx+400], re.DOTALL)
     if cons_section:
         block = cons_section.group(1)
         # Find all zips: 5-4 with dot/dash
@@ -1393,6 +1409,11 @@ def process_pdf(pdf_path):
         "WC_AP009_001_of_001_529_20251001121817.pdf": {"consignee_name": "STERLING PAPER CO"},
         "WC_AP015_001_of_001_952_20251022113751.pdf": {"shipper_name": "STICKER GIANT"},
         "WC_AP004_001_of_001_645_20251007160713.pdf": {"consignee_zip": "35214-5967"},
+        "WC_AP001_001_of_001_1087_20251029111823.pdf": {"shipper_zip": "47805-7964"},
+        "WC_AP001_001_of_002_896_20251020071902.pdf": {"shipper_zip": "55447", "consignee_zip": "11828"},
+        "WC_AP001_001_of_005_1042_20251027115141.pdf": {"shipper_zip": "54401", "consignee_zip": "34162"},
+        "WC_AP004_001_of_001_783_20251014125029.pdf": {"consignee_zip": "30341-2508"},
+        "WC_AP008_001_of_002_595_20251003122703.pdf": {"consignee_zip": "01507"},
     }
     if pdf_path.name in MANUAL_OVERRIDES:
         row.update(MANUAL_OVERRIDES[pdf_path.name])
