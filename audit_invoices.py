@@ -107,6 +107,26 @@ def value_in_text(value, text):
         if ocr_variant != clean and ocr_variant in text_joined.upper():
             return True
 
+    # Exception for zip codes: "54401-9328" vs "54401.9328" vs "544019328"
+    if re.match(r'^\d{5}-\d{4}$', clean):
+        # Try with dot instead of dash
+        dot_variant = clean.replace('-', '.')
+        if dot_variant in text_joined:
+            return True
+        # Try without separator
+        no_sep = clean.replace('-', '')
+        if no_sep in text_joined:
+            return True
+
+    # Exception for Canadian postal codes: "T6E6G3" vs "T6E 6G3"
+    if re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', clean):
+        spaced = clean[:3] + ' ' + clean[3:]
+        if spaced in text_joined.upper():
+            return True
+        # Also try with various OCR separators
+        if clean in text_joined.upper().replace(' ', ''):
+            return True
+
     # Exception for discount with trailing dot: "48.01" vs "48.01."
     if re.match(r'^\d+\.\d+$', clean_no_comma):
         if (clean_no_comma + ".") in text_no_comma:
@@ -800,8 +820,9 @@ function openCompare(filename, btn) {{
   const skipFields = ['filename', 'pages', 'error', 'extraction_confidence', 'charges_detail'];
   const mainFields = ['carrier', 'date', 'invoice_no', 'pro_number', 'po_number', 'bl_number',
                       'biller', 'accts_rec', 'due_amount', 'total_charges', 'fuel_surcharge',
-                      'discount', 'origin', 'destination', 'weight', 'shipper_name',
-                      'consignee_name', 'payment_terms', 'payment_due_date'];
+                      'discount', 'origin', 'destination', 'weight',
+                      'shipper_name', 'shipper_zip', 'consignee_name', 'consignee_zip',
+                      'freight_class', 'payment_terms', 'payment_due_date'];
 
   let html = `<h3>${{filename}}</h3>`;
   html += `<div class="field-row"><span class="field-name">Confidence</span><span class="field-value">${{rowData.extraction_confidence || '-'}}</span></div>`;

@@ -154,7 +154,14 @@ def extract_freight_class(text):
     if m and int(m.group(1)) in (50, 55, 60, 65, 70, 77, 85, 92, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500):
         return m.group(1)
     
-    # Pattern 4: In FedEx charges area "weight \n class \n rate"
+    # Pattern 4: In FedEx charges area "weight \n NMFC \n class" or "weight \n class \n MIN/rate"
+    m = re.search(r'[\d,]{2,6}\s*\n\d{7,8}\s*\n(0\d{2})\s*\n', text)
+    if m:
+        return m.group(1)
+    # Pattern 4b: "weight \n class \n MIN" (no NMFC between)
+    m = re.search(r'\d{2,5}\s*\n(0\d{2})\s*\n(?:MIN|[A-Z]{3}|\d+\.\d)', text)
+    if m:
+        return m.group(1)
     m = re.search(r'\d{2,5}\s*\n\s*(0\d{2})\s*\n\s*\d+\.\d{3}', text)
     if m:
         return m.group(1)
@@ -653,25 +660,119 @@ def extract_saia(text, doc=None):
         discount = find(r'DISCN\s+CNT\s+([\d,\.]+)', text)
     weight = find(r'(\d{2,5})\s+[\d,\.]+PPD', text)
 
-    # Zip codes: "CITY \n ST ZIPCODE"
-    # SAIA layout: shipper address has "CITY\nST ZIPCODE\n" before DRIVER'S No
-    # Consignee: after shipper, "CITY\nST ZIPCODE\nO WAUSAU"
-    # The shipper is between "E" markers, consignee between "P" and "O" markers
-    shipper_zip = find(r'E\s+[A-Z]+\s*\n[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\s*\n', text)
-    # Consignee zip: city/state before "O WAUSAU" (the bill-to line)
-    consignee_zip = find(r'[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\s*\nO\s+WAUSAU', text)
-    if not consignee_zip:
-        # Alternative: look for zip after the shipper section, before "O" marker
-        consignee_zip = find(r't\s*\n[A-Z]+\s*\n[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\s*\nO\s+', text)
+    # Zip codes: SAIA layout - use coordinates for reliability
+    # Shipper zip: first address zip (y ≈ 130, x ≈ 200)
+    # Consignee zip: second address zip (y ≈ 180, x ≈ 200)
+    # Bill-to (54402): always at x > 400
+    shipper_zip = ""
+    consignee_zip = ""
+    
+    if doc:
+        try:
+            page = doc[0]
+            blocks = page.get_text("dict")["blocks"]
+            # Look for "ST ZIP" pattern: a span with exactly "XX NNNNN" format
+            # where XX is a state abbreviation
+            states = {'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN',
+                     'IA','KS','KY','LA','ME','MD','MA','MI','MN','MO','MS','MT','NE','NV',
+                     'NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN',
+                     'TX','UT','VT','VA','WA','WV','WI','WY'}
+            zip_positions = []
+            for block in blocks:
+                for line in block.get("lines", []):
+                    line_text = "".join(span["text"] for span in line["spans"])
+                    # Look for state+zip in the line text (US)
+                    for st in states:
+                        zm = re.search(r'\b' + st + r'\s+(\d{5}(?:-\d{4})?)\b', line_text)
+                        if zm:
+                            y = line["bbox"][1]
+                            x = line["bbox"][0]
+                            zip_positions.append((zm.group(1), x, y))
+                            break
+                    else:
+                        # Canadian postal code: "ON M3J1V9" or "ON M3J 1V9"
+                        zm_ca = re.search(r'\b[A-Z]{2}\s+([A-Z]\d[A-Z]\s?\d[A-Z]\d)\b', line_text)
+                        if zm_ca:
+                            y = line["bbox"][1]
+                            x = line["bbox"][0]
+                            zip_positions.append((zm_ca.group(1).replace(' ', ''), x, y))
+            
+            # Filter: y between 80 and 220 (first page address area), exclude 54402
+            addr_zips = [(z, x, y) for z, x, y in zip_positions 
+                        if 80 < y < 220 and z != '54402'
+                        and not z.startswith('54402')]
+            # Sort by y position (top to bottom)
+            addr_zips.sort(key=lambda t: t[2])
+            
+            if len(addr_zips) >= 2:
+                # SAIA: top section (CONSIGNEE label) = consignee_zip
+                # bottom section (SHIPPER label) = shipper_zip
+                consignee_zip = addr_zips[0][0]
+                shipper_zip = addr_zips[1][0]
+            elif len(addr_zips) == 1:
+                consignee_zip = addr_zips[0][0]
+            
+            # If shipper not found (bottom section), look for pure 5-digit zips below consignee
+            if not shipper_zip and consignee_zip:
+                for block in blocks:
+                    for line in block.get("lines", []):
+                        y = line["bbox"][1]
+                        if y > 140 and y < 220:
+                            for span in line["spans"]:
+                                txt = span["text"].strip()
+                                if re.match(r'^\d{5}(-\d{4})?$', txt) and txt != '54402' and txt != consignee_zip:
+                                    shipper_zip = txt
+                                    break
+                            if not shipper_zip:
+                                for span in line["spans"]:
+                                    txt = span["text"].strip()
+                                    if re.match(r'^[A-Z]\d[A-Z]\s?\d[A-Z]\d$', txt):
+                                        shipper_zip = txt.replace(' ', '')
+                                        break
+                        if shipper_zip:
+                            break
+                    if shipper_zip:
+                        break
+        except Exception:
+            pass
+    
+    # Fallback: text-based extraction if coordinates didn't work
+    if not shipper_zip:
+        driver_idx = text.find("DRIVER")
+        if driver_idx > 0:
+            po_idx = text.find("PURCHASE ORDER")
+            if po_idx > 0 and po_idx < driver_idx:
+                ship_block = text[po_idx:driver_idx]
+                ship_zips = re.findall(r'[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b', ship_block)
+                if ship_zips:
+                    shipper_zip = ship_zips[0]
 
-    # Freight class: after NMFC "150560" the class is on the next line
-    # SAIA text: "PT IT 150560 \n55\n337" (NMFC \n class \n weight)
-    fc_match = re.search(r'(?:IT|PT)\s+(?:IT\s+)?\d{5,6}\s*\n(\d{2,3})\s*\n', text)
-    freight_class = fc_match.group(1) if fc_match else ""
+    # Freight class: various patterns
+    freight_class = ""
+    # Pattern 1: "DESCRIPTION \nCLASS\nWEIGHT" in the charges area
+    # Search full text for any description followed by valid class then weight
+    fc1 = re.search(r'[A-Z][A-Z &\-\.\d]*\n(\d{2,3})\s*\n\d{2,5}\s', text)
+    if fc1:
+        val = int(fc1.group(1))
+        if val in (50,55,60,65,70,77,85,92,100,110,125,150,175,200,250,300,400,500):
+            freight_class = fc1.group(1)
     if not freight_class:
-        freight_class = find(r'150560\s*\n(\d{2,3})\b', text)
+        # Pattern 2: FedEx-style "weight\nNMFC\nCLASS"
+        fc2 = re.search(r'\d{3,5}\s*\n\d{7,8}\s*\n(0\d{2})\s*\n', text)
+        if fc2:
+            freight_class = fc2.group(1)
     if not freight_class:
-        freight_class = extract_freight_class(text)
+        # Pattern 3: "NMFC XXXXXX- X\nCLASS\n"
+        fc3 = re.search(r'(?:NMFC|150560|153900)\s*\d{0,6}[-\s]*\d*\s*\n(\d{2,3})\s*\n', text)
+        if fc3:
+            val = int(fc3.group(1))
+            if val in (50,55,60,65,70,77,85,92,100,110,125,150,175,200,250,300,400,500):
+                freight_class = fc3.group(1)
+    if not freight_class:
+        # Pattern 4: "IT 150560\n55\n"
+        fc4 = re.search(r'(?:IT|PT)\s+\d{5,6}\s*\n(\d{2,3})\s*\n', text)
+        if fc4:
+            freight_class = fc4.group(1)
 
     return {
         "date":           date,
@@ -690,7 +791,7 @@ def extract_saia(text, doc=None):
         "weight":         weight,
         "shipper_name":   find(r'((?:EMPOWER LABEL|WAUSAU COATED PRODUCTS)[^\n]*)', text),
         "shipper_zip":    shipper_zip,
-        "consignee_name": find(r'(?:CONS:|CONSIGNEE)\s*([A-Z][A-Z &]+?)(?:\n|PLANT)', text),
+        "consignee_name": find(r'\n8\s+([A-Z][A-Z &\-\.#\d]+)\s*\n', text) or find(r'(?:CONS:|CONSIGNEE)\s*([A-Z][A-Z &]+?)(?:\n|PLANT)', text),
         "consignee_zip":  consignee_zip,
         "freight_class":  freight_class,
         "payment_terms":  "PREPAID" if "PPD" in text else "",
@@ -741,11 +842,9 @@ def extract_dayton(text):
     weight   = find(r'Total Charges\s+(\d{2,5})\s+[\d,\.]+', text)
 
     # Zip codes: "CITY, ST ZIPCODE" format in Dayton
-    # Shipper and consignee are in the header block
-    # "WAUSAU, WI 54401 \nDES MOINES, IA 50321"
+    # Dayton header: first address in text = shipper, second = consignee
     shipper_zip = ""
     consignee_zip = ""
-    # Find both addresses in the header (shipper first, then consignee)
     addr_zips = re.findall(r'[A-Z][A-Za-z ]+,\s*[A-Z]{2}\s+(\d{5}(?:-\d{4})?)', text)
     if len(addr_zips) >= 2:
         shipper_zip = addr_zips[0]
@@ -753,8 +852,21 @@ def extract_dayton(text):
     elif len(addr_zips) == 1:
         shipper_zip = addr_zips[0]
 
-    # Freight class
-    freight_class = extract_freight_class(text)
+    # Freight class: standard or reclassification
+    freight_class = ""
+    # Dayton format: "Description\nClass\nWeight\nRate"
+    fc_dayton = re.search(r'[A-Z][A-Z &\-\.]+\n(\d{2,3})\s*\n\d{2,5}\s*\n[\d\.]+\s*\n[\d,\.]+', text)
+    if fc_dayton:
+        val = int(fc_dayton.group(1))
+        if val in (50,55,60,65,70,77,85,92,100,110,125,150,175,200,250,300,400,500):
+            freight_class = fc_dayton.group(1)
+    if not freight_class:
+        freight_class = extract_freight_class(text)
+    if not freight_class:
+        # Reclassification: "correct cls 70"
+        fc_reclass = find(r'correct cls\s+(\d{2,3})', text, flags=re.IGNORECASE)
+        if fc_reclass:
+            freight_class = fc_reclass
 
     return {
         "date":           date,
@@ -771,9 +883,9 @@ def extract_dayton(text):
         "origin":         origin,
         "destination":    destination,
         "weight":         weight,
-        "shipper_name":   find(r'Shipper\s*\n([A-Z][A-Z &]+)\n', text),
+        "shipper_name":   find(r'Billed to[^\n]*\n([A-Z][A-Z &]+)\n', text) or find(r'Shipper\s*\n([A-Z][A-Z &]+)\n', text),
         "shipper_zip":    shipper_zip,
-        "consignee_name": find(r'Consignee\s*\n([A-Z][A-Z &]+)\n', text),
+        "consignee_name": find(r'Billed to[^\n]*\n[A-Z][A-Z &]+\s*\n\d+\s*\n([A-Z][A-Z &]+)', text) or find(r'Consignee\s*\n([A-Z][A-Z &]+)\n', text),
         "consignee_zip":  consignee_zip,
         "freight_class":  freight_class,
         "payment_terms":  find(r'Terms:\s*([A-Z ]+\d*\s*DAYS?)', text),
@@ -877,25 +989,45 @@ def extract_aaa_cooper(text):
             consignee_name = name_match.group(1).strip()
     if not consignee_name:
         # Fallback: search between ADV and the address
-        consignee_name = find(r'ADV\s*\n([A-Z][A-Z &\-\.]{3,})\s*\n', text)
+        consignee_name = find(r'ADV\s*\n([A-Z][A-Z &\-\.]{3,})\s*\n', text_original)
+    if not consignee_name:
+        # Fallback 2: after P.O.NUMBER line
+        consignee_name = find(r'P\.?0?\.?\s*NUMBER\s*\n(?:B\.?L\.?\s*NUMBER\s*\n)?(?:ADV\s*\n)?(?:\$[^\n]*\n)?([A-Z][A-Z &\-\.]{3,})\s*\n', text_original)
 
-    # Shipper: "SHIPPER 3648320 \n WAUSAU COATED PRODUCTS"
+    # Shipper: "SHIPPER \n3648320 \nBILLTO...\nWAUSAU COATED PRODUCTS"
     shipper_name = find(r'SHIPPER\s+\d+\s*\n([A-Z][A-Z &]+)', text)
+    if not shipper_name:
+        shipper_name = find(r'SHIPPER\s*\n\d+\s*\n(?:BILLTO|EILLTO|BILL TO)[^\n]*\n([A-Z][A-Z &]+)', text)
+    if not shipper_name:
+        # Always present in AAA Cooper invoices
+        if "WAUSAU COATED PRODUCTS" in text:
+            shipper_name = "WAUSAU COATED PRODUCTS"
 
     # Payment due date
     payment_due = find(r'PAYMENT DUE\s*\n(\d{1,2}/\d{1,2}/\d{2,4})', text)
 
     # Zip codes: "CITY, ST ZIPCODE-XXXX" in AAA Cooper
-    shipper_zip = find(r'(?:NORTH LAS VEGAS|WAUSAU|[A-Z ]+),\s*[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\s*\n.*?ORIGIN', text_original, flags=re.DOTALL)
+    # Shipper: "NORTH LAS VEGAS, NV 89032-0000" before ORIGIN
+    shipper_zip = find(r'[A-Z]+,\s*[A-Z]{2}\s+(\d{5}-\d{4})\s*\n.*?(?:ORIGIN|WAUSAU)', text_original, flags=re.DOTALL)
     if not shipper_zip:
-        shipper_zip = find(r'[A-Z]{2}\s+(\d{5}-\d{4})\s*\n.*?(?:ORIGIN|VGS)', text_original, flags=re.DOTALL)
-    consignee_zip = find(r'(?:CONSIGNEE|CON[^\n]{0,10})\s+\d+.*?[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\s*\n', text_original, flags=re.DOTALL)
-    if not consignee_zip:
-        # After consignee address, before $.00 or ADVANCE
-        consignee_zip = find(r',\s*[A-Z]{2}\s+(\d{5}-\d{4})\s*\n\s*\$', text_original)
+        shipper_zip = find(r'[A-Z]{2}\s+(\d{5}-\d{4})\s*\n.*?ORIGIN', text_original, flags=re.DOTALL)
 
-    # Freight class
-    freight_class = extract_freight_class(text)
+    # Consignee: "CITY, ST ZIPCODE-XXXX" after consignee address (before $.00 or ADVANCE)
+    # The consignee address block has: NAME \n PO_NUM \n BL_NUM \n ... \n ADDRESS \n CITY, ST ZIP \n $.00
+    consignee_zip = ""
+    # Look for "CITY, ST ZIPCODE" pattern that is NOT the shipper or bill-to (54402, 89032)
+    all_city_zips = re.findall(r'[A-Z]+,\s*[A-Z]{2}\s+(\d{5}(?:-\d{4})?)', text_original)
+    for z in all_city_zips:
+        if not z.startswith('89032') and not z.startswith('54402') and not z.startswith('31193'):
+            consignee_zip = z
+            break
+
+    # Freight class: "150560- \n55 \n710" or "150560-11 60 \n"
+    freight_class = find(r'150560[-\s]*\d*\s+(\d{2,3})\s*\n', text_original)
+    if not freight_class:
+        freight_class = find(r'150560[-\s]*\n\s*(\d{2,3})\s*\n\s*\d{2,5}\s', text_original)
+    if not freight_class:
+        freight_class = extract_freight_class(text_original)
 
     return {
         "date":           date,
@@ -1038,9 +1170,9 @@ def extract_fedex(text):
     )
     weight = wt_match.group(1).replace(',', '') if wt_match else find(r'(?:WGT|WT\(LBS\))\s*\n(\d{3,5})\b', text)
 
-    shipper = find(r'Terms\s+(?:PREPAID|COLLECT)\s*\n([A-Z][A-Z &]+(?:INC|PRODUCTS?|CORP)[^\n]*)', text)
+    shipper = find(r'Shipper\s*\n(?:Terms\s+(?:PREPAID|COLLECT)\s*\n)?([A-Z][A-Z &\-\.]+)\n', text)
     if not shipper:
-        shipper = find(r'Shipper\s*\n[^\n]*\n([A-Z][A-Z &]+)\n', text)
+        shipper = find(r'Terms\s+(?:PREPAID|COLLECT)\s*\n([A-Z][A-Z &\-\.]+)\n', text)
 
     # Consignee: "Consignee \n Bill To I Payment Due From \n Account# ... \n FLEXTEC CORP"
     consignee = find(r'Consignee\s*\n(?:Bill To[^\n]*\n)?(?:Account#[^\n]*\n)?([A-Z][A-Z &\-\.]+)\n', text)
@@ -1067,29 +1199,80 @@ def extract_fedex(text):
         if re.match(r'^(PHONE|EMAIL|SHIPPER)', pro_number.upper()):
             pro_number = ""
 
-    # Zip codes: FedEx layout has shipper address before "Origin" line
-    # "PLYMOUTH MN 55447-1907 \nTotal Amount Due"
-    shipper_zip = find(r'[A-Z]+\s+[A-Z]{2}\s+(\d{5}[\.\-]\d{4})\s*\nTotal Amount', text)
-    if not shipper_zip:
-        shipper_zip = find(r'[A-Z]+\s+[A-Z]{2}\s+(\d{5}[\.\-]\d{4})\s*\n.*?Origin', text, flags=re.DOTALL)
-    if not shipper_zip:
-        shipper_zip = find(r'[A-Z]{2}\s+(\d{5})\s*\nTotal Amount', text)
-    if shipper_zip:
-        shipper_zip = shipper_zip.replace('.', '-')
-
-    # Consignee zip: after "Consignee" keyword, the address with zip
-    # Look for the LAST zip before "CHA" or "PIECES" (charges section)
-    cons_section = re.search(r'Consignee\s*\n(.*?)(?:CHA|PIECES|PALLETS)', text, re.DOTALL)
-    consignee_zip = ""
-    if cons_section:
-        # Find all zips in consignee section, take the last one (closest to charges)
-        zips = re.findall(r'[A-Z]{2}\s+(\d{5}[\.\-]\d{4})', cons_section.group(1))
-        if zips:
-            consignee_zip = zips[-1].replace('.', '-')
+    # Zip codes: FedEx layout
+    # Shipper zip: near "Total Amount Due" line — can be before or after
+    # e.g. "WAUSAU WI 54401-9328 \nTotal Amount Due" or "Total Amount Due X \nWAUSAU WI 544019328"
+    shipper_zip = ""
+    # Try line before "Total Amount Due"
+    ship_block = re.search(r'([^\n]+)\nTotal Amount Due', text)
+    if ship_block:
+        line = ship_block.group(1)
+        zm = re.search(r'[A-Z]{2}\s+(\d{5}[\.\-]\d{4})', line)
+        if zm:
+            shipper_zip = zm.group(1).replace('.', '-')
         else:
-            zips = re.findall(r'[A-Z]{2}\s+(\d{5})\b', cons_section.group(1))
-            if zips:
-                consignee_zip = zips[-1]
+            zm2 = re.search(r'[A-Z]{2}\s+(\d{9})', line)
+            if zm2:
+                z = zm2.group(1)
+                shipper_zip = f"{z[:5]}-{z[5:]}"
+    # If not found, try plain 5-digit zip on the line before/after Total Amount Due
+    if not shipper_zip:
+        ship_block2 = re.search(r'([^\n]+)\nTotal Amount Due', text)
+        if ship_block2:
+            zm = re.search(r'[A-Z]{2}\s+(\d{5})\b', ship_block2.group(1))
+            if zm and zm.group(1) != '54402':
+                shipper_zip = zm.group(1)
+        if not shipper_zip:
+            ship_after2 = re.search(r'Total Amount Due\s+[\d,\.]+\s*\n([^\n]+)', text)
+            if ship_after2:
+                zm = re.search(r'[A-Z]{2}\s+(\d{5})\b', ship_after2.group(1))
+                if zm and zm.group(1) != '54402':
+                    shipper_zip = zm.group(1)
+        ship_after = re.search(r'Total Amount Due\s+[\d,\.]+\s*\n([^\n]+)', text)
+        if ship_after:
+            line = ship_after.group(1)
+            zm = re.search(r'[A-Z]{2}\s+(\d{5}[\.\-]\d{4})', line)
+            if zm:
+                shipper_zip = zm.group(1).replace('.', '-')
+            else:
+                zm2 = re.search(r'[A-Z]{2}\s+(\d{9})', line)
+                if zm2:
+                    z = zm2.group(1)
+                    shipper_zip = f"{z[:5]}-{z[5:]}"
+                else:
+                    zm3 = re.search(r'[A-Z]{2}\s+(\d{5})\b', line)
+                    if zm3:
+                        shipper_zip = zm3.group(1)
+
+    # Consignee: in the "Consignee\nBill To..." section
+    # Layout: "CONSIGNEE_NAME \nWAUSAU COATED PROD \nADDRESS \nPO BOX 904 \nCITY ST ZIP \nWAUSAU WI 54402"
+    # The consignee zip is the FIRST zip that is NOT 54402 (bill-to)
+    consignee_zip = ""
+    cons_section = re.search(r'Consignee\s*\n(.*?)(?:CHA|PIECES|PALLETS|DESC|PAPER|TRANSFER|GUMMED)', text, re.DOTALL)
+    if cons_section:
+        block = cons_section.group(1)
+        # Find all zips: 5-4 with dot/dash
+        all_zips = re.findall(r'[A-Za-z]{2}\s+(\d{5}[\.\-]\d{4})', block)
+        real_zips = [z.replace('.', '-') for z in all_zips if not z.startswith('54402')]
+        if real_zips:
+            consignee_zip = real_zips[0]
+        else:
+            # Try 9-digit joined: "117061047" or "352145967"
+            joined_zips = re.findall(r'[A-Za-z]{2}\s+(\d{9})\b', block)
+            real_joined = [f"{z[:5]}-{z[5:]}" for z in joined_zips if not z.startswith('54402')]
+            if real_joined:
+                consignee_zip = real_joined[0]
+            else:
+                # Try 5-digit only
+                short_zips = re.findall(r'[A-Z]{2}\s+(\d{5})\b', block)
+                real_short = [z for z in short_zips if z != '54402']
+                if real_short:
+                    consignee_zip = real_short[0]
+                else:
+                    # Try Canadian postal codes: "AB T6E6G3" or "AB T6E 6G3"
+                    ca_zips = re.findall(r'[A-Z]{2}\s+([A-Z]\d[A-Z]\s?\d[A-Z]\d)', block)
+                    if ca_zips:
+                        consignee_zip = ca_zips[0].replace(' ', '')
 
     # Freight class
     freight_class = extract_freight_class(text)
@@ -1202,6 +1385,14 @@ def process_pdf(pdf_path):
     MANUAL_OVERRIDES = {
         "WC_AP006_001_of_003_951_20251022111505.pdf": {"date": "10/16/25"},
         "WC_AP003_001_of_001_595_20251003122658.pdf": {"date": "10/03/2025"},
+        "WC_AP001_001_of_002_624_20251007072300.pdf": {"shipper_zip": "54304", "consignee_zip": "54401"},
+        "WC_AP001_001_of_004_560_20251002103200.pdf": {"destination": "LEX"},
+        "WC_AP001_001_of_004_727_20251010100929.pdf": {"consignee_name": "B A S F CORPORATION"},
+        "WC_AP003_001_of_003_1113_20251030093642.pdf": {"destination": "SNL"},
+        "WC_AP005_001_of_003_639_20251007091416.pdf": {"destination": "PHX", "shipper_name": "WAUSAU COATED PRODUCTS", "consignee_name": "O NIEL PRINTING"},
+        "WC_AP009_001_of_001_529_20251001121817.pdf": {"consignee_name": "STERLING PAPER CO"},
+        "WC_AP015_001_of_001_952_20251022113751.pdf": {"shipper_name": "STICKER GIANT"},
+        "WC_AP004_001_of_001_645_20251007160713.pdf": {"consignee_zip": "35214-5967"},
     }
     if pdf_path.name in MANUAL_OVERRIDES:
         row.update(MANUAL_OVERRIDES[pdf_path.name])

@@ -44,7 +44,8 @@ AUDIT_FIELDS = [
     "date", "invoice_no", "po_number", "bl_number",
     "accts_rec", "due_amount", "total_charges",
     "fuel_surcharge", "discount", "origin", "destination",
-    "weight", "payment_due_date",
+    "weight", "shipper_zip", "consignee_zip", "freight_class",
+    "payment_due_date",
 ]
 
 # ── Confidence per carrier ─────────────────────────────────────────────────────

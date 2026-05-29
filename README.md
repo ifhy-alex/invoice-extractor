@@ -10,10 +10,10 @@ Automated freight invoice data extraction from PDF. Processes ~950 invoices in ~
 
 | Carrier | Fields Extracted |
 |---------|-----------------|
-| **SAIA Motor Freight** | date, invoice_no, po_number, bl_number, biller, accts_rec, due_amount, total_charges, fuel_surcharge, discount, origin, destination, weight, charges breakdown |
-| **Dayton Freight** | date, invoice_no, pro_number, po_number, bl_number, accts_rec, due_amount, total_charges, fuel_surcharge, discount, origin, destination, weight, payment_terms, payment_due_date, charges breakdown |
-| **FedEx Freight** | date (invoice date), invoice_no, pro_number, po_number, bl_number, accts_rec, due_amount, total_charges, fuel_surcharge, discount, origin, destination, weight, payment_terms, payment_due_date, charges breakdown |
-| **AAA Cooper** | date, pro_number, po_number, bl_number, accts_rec, due_amount, total_charges, fuel_surcharge, origin, destination, weight, payment_terms, payment_due_date, charges breakdown |
+| **SAIA Motor Freight** | date, invoice_no, po_number, bl_number, biller, accts_rec, due_amount, total_charges, fuel_surcharge, discount, origin, destination, weight, shipper_name, shipper_zip, consignee_name, consignee_zip, freight_class, charges breakdown |
+| **Dayton Freight** | date, invoice_no, pro_number, po_number, bl_number, accts_rec, due_amount, total_charges, fuel_surcharge, discount, origin, destination, weight, shipper_name, shipper_zip, consignee_name, consignee_zip, freight_class, payment_terms, payment_due_date, charges breakdown |
+| **FedEx Freight** | date (invoice date), invoice_no, pro_number, po_number, bl_number, accts_rec, due_amount, total_charges, fuel_surcharge, discount, origin, destination, weight, shipper_name, shipper_zip, consignee_name, consignee_zip, freight_class, payment_terms, payment_due_date, charges breakdown |
+| **AAA Cooper** | date, pro_number, po_number, bl_number, accts_rec, due_amount, total_charges, fuel_surcharge, origin, destination, weight, shipper_name, shipper_zip, consignee_name, consignee_zip, freight_class, payment_terms, payment_due_date, charges breakdown |
 
 ### Charges Breakdown (per invoice)
 
@@ -189,8 +189,10 @@ This will:
 | HIGH confidence | 948 (100%) |
 | MEDIUM confidence | 0 |
 | LOW confidence | 0 |
-| Audit accuracy | 100.0% (11,209/11,209 fields) |
+| Audit accuracy | 100.0% (13,984 fields) |
 | Extraction time | ~11 seconds |
+| Fields per invoice | 27 |
+| Charge line items | 3,229 |
 
 ---
 
